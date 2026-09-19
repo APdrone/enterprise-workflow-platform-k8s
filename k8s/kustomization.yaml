@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: workflow-platform
+
+resources:
+  - 00-namespace.yaml
+  - 01-configmaps-secrets.yaml
+  - 02-postgres.yaml
+  - 03-kafka.yaml
+  - 04-workflow-api.yaml
+  - 05-notification-service.yaml
+  - 06-audit-service.yaml
+  - 07-host-app.yaml
+  - 08-ingress.yaml
+  - 09-observability.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: workflow-platform
+      app.kubernetes.io/managed-by: kustomize

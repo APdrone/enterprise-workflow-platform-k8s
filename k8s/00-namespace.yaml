@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: workflow-platform
+  labels:
+    app.kubernetes.io/part-of: workflow-platform
+    app.kubernetes.io/environment: distributed

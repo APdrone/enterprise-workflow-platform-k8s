@@ -1,0 +1,37 @@
+{
+  "name": "workflow-platform",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Multi-tenant Event-Driven Workflow Microservices Platform",
+  "workspaces": [
+    "packages/*",
+    "services/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "dev": "concurrently \"npm run dev:api\" \"npm run dev:notification\" \"npm run dev:audit\" \"npm run dev:widget\" \"npm run dev:host\"",
+    "dev:api": "npm run dev --workspace=@workflow/workflow-api",
+    "dev:notification": "npm run dev --workspace=@workflow/notification-service",
+    "dev:audit": "npm run dev --workspace=@workflow/audit-service",
+    "dev:widget": "npm run dev --workspace=@workflow/workflow-widget",
+    "dev:host": "npm run dev --workspace=@workflow/host-app",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down -v",
+    "k8s:reload": "powershell -ExecutionPolicy Bypass -File ./k8s/local/redeploy-local.ps1 -Target all",
+    "k8s:reload:ui": "powershell -ExecutionPolicy Bypass -File ./k8s/local/redeploy-local.ps1 -Target ui",
+    "k8s:reload:api": "powershell -ExecutionPolicy Bypass -File ./k8s/local/redeploy-local.ps1 -Target api",
+    "k8s:reset:data": "powershell -ExecutionPolicy Bypass -File ./k8s/local/reset-data.ps1",
+    "k8s:reset:hard": "powershell -ExecutionPolicy Bypass -File ./k8s/local/reset-data.ps1 -HardReset"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.1",
+    "@types/node": "^22.0.0",
+    "concurrently": "^9.1.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  }
+}

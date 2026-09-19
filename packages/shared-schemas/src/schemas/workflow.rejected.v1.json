@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.workflow-platform.internal/events/workflow.rejected.v1.json",
+  "title": "WorkflowRejectedEventV1",
+  "type": "object",
+  "required": ["id", "source", "specversion", "type", "time", "datacontenttype", "data"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "source": { "type": "string", "enum": ["workflow-api"] },
+    "specversion": { "type": "string", "enum": ["1.0"] },
+    "type": { "type": "string", "enum": ["workflow.rejected.v1"] },
+    "time": { "type": "string", "format": "date-time" },
+    "datacontenttype": { "type": "string", "enum": ["application/json"] },
+    "data": {
+      "type": "object",
+      "required": ["workflowId", "tenantId", "type", "title", "requesterId", "requesterName", "actorId", "previousStatus", "currentStatus", "rejectionReason", "timestamp"],
+      "additionalProperties": true,
+      "properties": {
+        "workflowId": { "type": "string", "format": "uuid" },
+        "tenantId": { "type": "string", "minLength": 1 },
+        "type": { "type": "string", "enum": ["EXPENSE", "LEAVE", "PURCHASE_ORDER", "GENERIC"] },
+        "title": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "amount": { "type": "number", "minimum": 0 },
+        "currency": { "type": "string", "minLength": 3, "maxLength": 3 },
+        "requesterId": { "type": "string", "minLength": 1 },
+        "requesterName": { "type": "string", "minLength": 1 },
+        "actorId": { "type": "string", "minLength": 1 },
+        "previousStatus": { "type": "string", "enum": ["PENDING"] },
+        "currentStatus": { "type": "string", "enum": ["REJECTED"] },
+        "rejectionReason": { "type": "string", "minLength": 1 },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "metadata": { "type": "object" }
+      }
+    }
+  }
+}

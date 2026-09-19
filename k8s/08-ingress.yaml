@@ -1,0 +1,43 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: workflow-ingress
+  namespace: workflow-platform
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  rules:
+    - http:
+        paths:
+          # API & Health Endpoints
+          - path: /api(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: workflow-api
+                port:
+                  number: 3000
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: workflow-api
+                port:
+                  number: 3000
+          - path: /ready
+            pathType: Exact
+            backend:
+              service:
+                name: workflow-api
+                port:
+                  number: 3000
+          # Frontend Host App
+          - path: /(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: host-app
+                port:
+                  number: 80

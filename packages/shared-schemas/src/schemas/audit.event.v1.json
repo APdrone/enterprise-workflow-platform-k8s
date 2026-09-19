@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.workflow-platform.internal/events/audit.event.v1.json",
+  "title": "AuditEventV1",
+  "type": "object",
+  "required": ["id", "workflowId", "tenantId", "eventType", "actorId", "timestamp", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "workflowId": { "type": "string", "format": "uuid" },
+    "tenantId": { "type": "string", "minLength": 1 },
+    "eventType": { "type": "string", "minLength": 1 },
+    "actorId": { "type": "string", "minLength": 1 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "payload": { "type": "object" }
+  }
+}

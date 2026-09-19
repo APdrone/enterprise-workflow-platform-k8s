@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Workflow Web Component Widget Playground</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+      :root {
+        --primary: #2563eb;
+        --bg: #0f172a;
+        --card-bg: #ffffff;
+      }
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        font-family: 'Plus Jakarta Sans', -apple-system, sans-serif;
+        background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+        min-height: 100vh;
+        color: #f8fafc;
+        padding: 40px 20px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+      }
+      .playground-wrapper {
+        width: 100%;
+        max-width: 820px;
+      }
+      .header-bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 24px;
+      }
+      .badge-tag {
+        font-size: 11px;
+        font-weight: 700;
+        padding: 4px 10px;
+        background: rgba(37, 99, 235, 0.2);
+        color: #60a5fa;
+        border: 1px solid rgba(59, 130, 246, 0.3);
+        border-radius: 9999px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+      .toolbar-card {
+        background: #1e293b;
+        border: 1px solid #334155;
+        border-radius: 12px;
+        padding: 16px 20px;
+        margin-bottom: 24px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+        align-items: center;
+        justify-content: space-between;
+      }
+      .tool-group {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      label {
+        font-size: 12px;
+        font-weight: 600;
+        color: #94a3b8;
+        text-transform: uppercase;
+      }
+      select, button {
+        background: #0f172a;
+        border: 1px solid #334155;
+        color: #f8fafc;
+        padding: 6px 12px;
+        border-radius: 6px;
+        font-size: 13px;
+        font-weight: 500;
+        cursor: pointer;
+        outline: none;
+      }
+      .btn-nav {
+        background: #2563eb;
+        border: none;
+        color: #ffffff;
+        font-weight: 600;
+        padding: 8px 16px;
+        border-radius: 6px;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 13px;
+      }
+      .events-console {
+        margin-top: 24px;
+        background: #020617;
+        border: 1px solid #1e293b;
+        border-radius: 12px;
+        padding: 16px;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 12px;
+      }
+      .events-title {
+        color: #64748b;
+        margin-bottom: 8px;
+        font-weight: 600;
+        display: flex;
+        justify-content: space-between;
+      }
+      .event-log-item {
+        color: #38bdf8;
+        margin-bottom: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="playground-wrapper">
+      <div class="header-bar">
+        <div>
+          <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 4px;">
+            <h1 style="font-size: 22px; font-weight: 800;">Workflow Web Component</h1>
+            <span class="badge-tag">&lt;workflow-widget&gt;</span>
+          </div>
+          <p style="font-size: 13px; color: #94a3b8;">Standalone Micro-Frontend Developer Playground</p>
+        </div>
+        <a href="http://localhost:5173" class="btn-nav">
+          Open Full Host App ↗
+        </a>
+      </div>
+
+      <!-- Controls bar -->
+      <div class="toolbar-card">
+        <div class="tool-group">
+          <label for="persona-select">Persona / Role:</label>
+          <select id="persona-select">
+            <option value="requester|user-alice|Alice Johnson">Alice Johnson — Requester (Employee)</option>
+            <option value="team_lead|user-bob|Bob Smith">Bob Smith — Team Lead (Step 1 Approver)</option>
+            <option value="dept_manager|user-carol|Carol White">Carol White — Dept Manager (Step 2 Approver)</option>
+            <option value="finance_director|user-diana|Diana Prince">Diana Prince — Finance Director (Step 3 Approver)</option>
+            <option value="admin|user-admin|Admin User">Admin User — Super Admin (All Steps)</option>
+          </select>
+        </div>
+
+        <div class="tool-group">
+          <label for="tenant-select">Tenant:</label>
+          <select id="tenant-select">
+            <option value="tenant-corp-a">Tokyo Holdings (Tenant A)</option>
+            <option value="tenant-corp-b">Kyoto Robotics (Tenant B)</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- The Custom Web Component element -->
+      <div id="widget-container">
+        <workflow-widget
+          id="demo-widget"
+          api-url="http://localhost:3000"
+          tenant-id="tenant-corp-a"
+          user-id="user-alice"
+          user-name="Alice Johnson"
+          user-role="requester"
+        ></workflow-widget>
+      </div>
+
+      <!-- Event stream console -->
+      <div class="events-console">
+        <div class="events-title">
+          <span>Web Component Custom Events Stream</span>
+          <span style="color: #10b981;">● Listening</span>
+        </div>
+        <div id="events-log">
+          <div class="event-log-item" style="color: #64748b;">Waiting for widget status transitions and events...</div>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/web-component.tsx"></script>
+
+    <script>
+      const widget = document.getElementById('demo-widget');
+      const personaSelect = document.getElementById('persona-select');
+      const tenantSelect = document.getElementById('tenant-select');
+      const eventsLog = document.getElementById('events-log');
+
+      personaSelect.addEventListener('change', (e) => {
+        const [role, id, name] = e.target.value.split('|');
+        widget.setAttribute('user-role', role);
+        widget.setAttribute('user-id', id);
+        widget.setAttribute('user-name', name);
+        logEvent(`Switched persona to ${name} (${role})`);
+      });
+
+      tenantSelect.addEventListener('change', (e) => {
+        widget.setAttribute('tenant-id', e.target.value);
+        logEvent(`Switched tenant to ${e.target.value}`);
+      });
+
+      widget.addEventListener('workflow-status-change', (e) => {
+        logEvent(`[EVENT] workflow-status-change -> New Status: ${e.detail.status} (ID: ${e.detail.workflow?.id})`);
+      });
+
+      widget.addEventListener('workflow-error', (e) => {
+        logEvent(`[EVENT] workflow-error -> ${e.detail.error?.message || e.detail.error}`);
+      });
+
+      function logEvent(msg) {
+        const time = new Date().toLocaleTimeString();
+        const div = document.createElement('div');
+        div.className = 'event-log-item';
+        div.innerHTML = `<span style="color: #64748b;">[${time}]</span> ${msg}`;
+        eventsLog.prepend(div);
+      }
+    </script>
+  </body>
+</html>
