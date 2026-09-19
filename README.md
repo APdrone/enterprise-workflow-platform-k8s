@@ -96,6 +96,77 @@ flowchart TD
 
 ---
 
+## 🏗️ Implementation & Core Subsystems Breakdown
+
+### 1. 🖥️ Microfrontends Layer (Host & Remotes)
+The UI is split into independently buildable, deployable, and embeddable frontend applications:
+* **Host Application ([`apps/host-app`](./apps/host-app))** (Port `8080` / `5173`):
+  * **Role**: Primary shell & dashboard application built with React 18, TypeScript, and Vite.
+  * **Features**: Multi-tenant context switcher, user role selector, multi-step expense creator, approvals inbox, audit log timeline, and live notification alerts.
+* **Remote Widget ([`apps/workflow-widget`](./apps/workflow-widget))** (Port `3003`):
+  * **Role**: Framework-agnostic Web Component (`<workflow-widget>`) compiled with custom Shadow DOM encapsulation via [`web-component.tsx`](./apps/workflow-widget/src/web-component.tsx).
+  * **Integration**: Embeddable in any web application with standard HTML attributes (`tenant-id`, `api-url`, `user-id`, `workflow-id`).
+
+### 2. 📨 Kafka Messaging Layer Details
+Asynchronous, distributed event streaming powered by Apache Kafka and the **CloudEvents 1.0 specification**:
+* **Broker & Ports**: Kafka Broker on port `9092` (with Schema Registry on `:8081` and Kafka UI on `:8085`).
+* **Topic**: `workflow.events` (partitioned for high throughput and horizontal scalability).
+* **Partition Key**: `tenantId:workflowId` (guarantees strict per-workflow message ordering within tenant partitions).
+* **Tracing Context**: Injects standard W3C `traceparent` headers into Kafka records for end-to-end distributed tracing across microservices.
+* **Schema Validation**: Runtime schema enforcement with CloudEvents JSON schemas ([`packages/shared-schemas`](./packages/shared-schemas)).
+* **Published Event Types** ([`packages/shared-types`](./packages/shared-types/src/events.types.ts)):
+  * `workflow.submitted.v1` — Workflow draft submitted for multi-tier review.
+  * `workflow.step_approved.v1` — Intermediate step approved; advances to next tier.
+  * `workflow.approved.v1` — Final step approved; workflow marked as completed.
+  * `workflow.rejected.v1` — Workflow rejected with mandatory reason.
+  * `workflow.cancelled.v1` — Workflow cancelled by requester.
+* **Consumer Groups**:
+  * `notification-service-group`: Consumes events to generate targeted in-app alerts.
+  * `audit-service-group`: Consumes events to maintain an immutable compliance log.
+
+### 3. ⚙️ Backend (BE) Microservices
+All backend services are built with **Fastify, Node.js, and TypeScript**:
+* **[`services/workflow-api`](./services/workflow-api)** (Port `3000`):
+  * Core workflow orchestration engine, dynamic multi-tier threshold state machine, and delegation validation.
+  * Contains the **Transactional Outbox Relay** background worker for zero-data-loss publishing.
+  * Middleware: Tenant isolation (`x-tenant-id`), Correlation ID (`x-correlation-id`), and Idempotency deduplication (`Idempotency-Key`).
+* **[`services/notification-service`](./services/notification-service)** (Port `3001`):
+  * Dedicated event consumer that processes workflow lifecycle transitions and stores role-targeted alerts.
+  * Provides REST query endpoints for host UI notifications.
+* **[`services/audit-service`](./services/audit-service)** (Port `3002`):
+  * Immutable audit ledger consumer that writes all CloudEvents to `audit_db`.
+  * Provides query APIs for full compliance lifecycle and actor tracking.
+
+### 4. 🏢 Tenants & Roles (Multi-Tenancy & RBAC)
+* **Tenant Isolation**:
+  * Logical isolation enforced via mandatory `x-tenant-id` HTTP request headers.
+  * All database queries scoped with `WHERE tenant_id = :tenantId`.
+  * **Demo Presets**: `tenant-corp-a` (Tokyo Holdings), `tenant-corp-b` (Kyoto Robotics), `tenant-corp-c` (Nagoya Logistics).
+* **Role-Based Access Control (RBAC)**:
+  * **`requester` (`user-alice`)**: Submits expense claims and workflow requests.
+  * **`team_lead` (`user-bob`)**: Step 1 Approver (handles amounts $\le \$10,000$).
+  * **`dept_manager` (`user-carol`)**: Step 2 Approver (handles amounts $>\$10,000$ and $\le \$100,000$).
+  * **`finance_director` (`user-diana`)**: Step 3 Approver (handles major expenses $>\$100,000$).
+  * **`admin` (`user-admin`)**: Super admin with global override across all steps.
+* **Delegation / Proxy Approver Support**:
+  * Approvers can grant temporary approval authority to delegatees with `validFrom` and `validUntil` date ranges.
+
+### 5. 🗄️ Database & Persistence Layer
+PostgreSQL 16 managed with **Drizzle ORM** (Port `5433`):
+* **Databases**:
+  * `workflow_db`: Operational database for `workflow-api`.
+  * `audit_db`: Dedicated append-only compliance database for `audit-service`.
+  * `pact_db`: Pact Broker storage for contract test verification.
+* **Key Tables** ([`services/workflow-api/src/db/schema.ts`](./services/workflow-api/src/db/schema.ts)):
+  * `workflows`: Stores workflow metadata, amount, current state, current step order, total steps.
+  * `workflow_steps`: Stores multi-step approval chain, designated roles, approvers, action timestamps, comments.
+  * `delegations`: Stores active out-of-office delegation rules.
+  * `idempotency_keys`: Stores request hashes, processing status, and cached response payloads.
+  * `outbox_events`: Stores unpublished CloudEvents, publication status (`published = false/true`), and retry counts.
+  * `audit_events` (in `audit_db`): Stores immutable CloudEvent payloads, actors, event types, and timestamps.
+
+---
+
 ## 📂 Repository Layout
 
 ```text
