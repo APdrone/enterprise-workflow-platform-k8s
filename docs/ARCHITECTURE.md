@@ -251,13 +251,135 @@ sequenceDiagram
 
 ---
 
+### 📡 Case 5: Real-Time Live Sync (Server-Sent Events / SSE)
+
+**Business Goal**: Instant, zero-polling reactive UI updates for approvers and requesters across browser tabs.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Alice as Requester (Browser A)
+    actor Bob as Approver (Browser B)
+    participant HostApp as Host React UI
+    participant NotifSvc as Notification Service (:3001)
+    participant WFAPI as Workflow API (:3000)
+    participant Kafka as Kafka Broker
+
+    Alice->>NotifSvc: GET /api/v1/stream?tenantId=tenant-corp-a&userId=user-alice (SSE Connection)
+    Bob->>NotifSvc: GET /api/v1/stream?tenantId=tenant-corp-a&userId=user-bob (SSE Connection)
+    NotifSvc-->>Alice: Handshake { type: "connected", clientId: "..." }
+    NotifSvc-->>Bob: Handshake { type: "connected", clientId: "..." }
+
+    Note over Alice,WFAPI: Alice submits a new expense workflow
+    Alice->>WFAPI: POST /api/v1/workflows/:id/submit
+    WFAPI->>Kafka: Publish workflow.submitted.v1
+    Kafka->>NotifSvc: Consume workflow.submitted.v1
+    NotifSvc->>NotifSvc: SSEManager.broadcast(tenant-corp-a, event)
+    NotifSvc-->>Bob: SSE event: workflow.submitted.v1 (Instant push!)
+    Note over Bob: UI displays live Toast Popup & increments Approval Inbox badge without page refresh
+```
+
+---
+
+### 🚨 Case 6: Kafka Dead Letter Queue (DLQ) & Poison-Pill Isolation
+
+**Business Goal**: Prevent malformed messages or schema violations from blocking consumer group partitions or halting downstream workflow processing.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant BadActor as Producer / Legacy Client
+    participant Kafka as Kafka Broker
+    participant AuditSvc as Audit Service Consumer
+    participant AuditDB as PostgreSQL (audit_db)
+    participant Admin as System Administrator
+
+    BadActor->>Kafka: Publish malformed / invalid event to workflow.events
+    Kafka->>AuditSvc: Consume message
+    AuditSvc->>AuditSvc: Validate JSON Schema / Payload
+    Note over AuditSvc: Schema validation error detected!
+    AuditSvc->>Kafka: Route immediately to workflow.events.dlq (x-error-type: SCHEMA_VALIDATION_ERROR)
+    AuditSvc->>AuditDB: Persist into dlq_messages table (status: DEAD_LETTERED)
+    Note over AuditSvc: Main consumer partition continues processing next messages with zero lag
+
+    Note over Admin,AuditSvc: Operator inspection & replay
+    Admin->>AuditSvc: GET /api/v1/dlq/messages?status=DEAD_LETTERED
+    Admin->>AuditSvc: POST /api/v1/dlq/replay/:id
+    AuditSvc->>Kafka: Re-publish clean payload to workflow.events
+    AuditSvc->>AuditDB: UPDATE dlq_messages SET status='REPLAYED'
+```
+
+---
+
+### 🔀 Case 7: Configurable Workflow Rules & Parallel Approvals (AND/OR Quorums)
+
+**Business Goal**: Tenant-configurable multi-approver routing supporting both unanimous AND quorums and first-responder OR quorums.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Alice as Requester
+    actor Legal as Legal Approver (User 1)
+    actor Sec as Security Approver (User 2)
+    participant WFAPI as Workflow API
+    participant RulesEngine as Dynamic Rules Engine
+    participant DB as PostgreSQL (workflow_db)
+
+    Alice->>WFAPI: POST /api/v1/workflows (Type: ACCESS, Amount: 0)
+    WFAPI->>RulesEngine: evaluateSteps(tenantId, ACCESS)
+    RulesEngine->>DB: Query active workflow_rules for tenant
+    RulesEngine-->>WFAPI: Generate 2 Parallel Steps (StepOrder: 1, Policy: ALL_MUST_APPROVE)
+    Alice->>WFAPI: POST /api/v1/workflows/:id/submit
+
+    Note over Legal,WFAPI: Legal Approves Step 1A
+    Legal->>WFAPI: POST /api/v1/workflows/:id/approve (stepId: 1A)
+    WFAPI->>DB: UPDATE workflow_steps SET status='APPROVED' WHERE id=1A
+    WFAPI->>WFAPI: Evaluate Quorum: Step 1B is still PENDING -> Workflow remains PENDING
+    WFAPI-->>Legal: 200 OK (Workflow status: PENDING)
+
+    Note over Sec,WFAPI: Security Approves Step 1B
+    Sec->>WFAPI: POST /api/v1/workflows/:id/approve (stepId: 1B)
+    WFAPI->>DB: UPDATE workflow_steps SET status='APPROVED' WHERE id=1B
+    WFAPI->>WFAPI: Evaluate Quorum: All parallel steps approved! -> Workflow transitions to APPROVED
+    WFAPI-->>Sec: 200 OK (Workflow status: APPROVED)
+```
+
+---
+
+### 🛡️ Case 8: PostgreSQL Row-Level Security (RLS) Database Hardening
+
+**Business Goal**: Engine-level tenant isolation preventing cross-tenant data access even if application queries omit `WHERE tenant_id = ...`.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Attacker as Attacker (Tenant Beta)
+    participant API as Workflow API
+    participant ClientPool as PostgreSQL Connection Pool (withTenantContext)
+    participant Postgres as PostgreSQL Engine (RLS Enforced)
+
+    Attacker->>API: Malicious API Call (x-tenant-id: tenant-beta)
+    API->>ClientPool: withTenantContext("tenant-beta", callback)
+    ClientPool->>Postgres: BEGIN TRANSACTION
+    ClientPool->>Postgres: SELECT set_config('app.current_tenant_id', 'tenant-beta', true)
+    
+    Note over ClientPool,Postgres: Attempt to query or insert Tenant Alpha data
+    ClientPool->>Postgres: INSERT INTO workflows (id, tenant_id='tenant-alpha', ...)
+    Postgres--xClientPool: ERROR: new row violates row-level security policy for table "workflows"
+    ClientPool->>Postgres: ROLLBACK
+    Postgres-->>API: 403 Forbidden / Security Violation
+```
+
+---
+
 ## 4. Multi-Tenant Security & Isolation Architecture
 
-Every API request is evaluated under strict tenant boundary enforcement:
-1. **Request Ingestion**: `x-tenant-id` header is extracted and validated in `tenantMiddleware`. Missing header results in `400 MISSING_TENANT_ID`.
-2. **Data Partitioning**: All SQL queries include mandatory `WHERE tenant_id = :tenantId`.
-3. **Kafka Partition Keys**: All Kafka event messages are keyed by `tenantId:workflowId` ensuring strict ordering per tenant workflow partition.
-4. **Consumer Deduplication**: `notification-service` and `audit-service` enforce tenant-scoped idempotency tables to ignore duplicate event deliveries.
+Every API request is evaluated under strict multi-layer tenant boundary enforcement:
+1. **Header Ingestion**: `x-tenant-id` header is extracted and validated in `tenantMiddleware`. Missing header results in `400 MISSING_TENANT_ID`.
+2. **PostgreSQL Row-Level Security (RLS)**: `FORCE ROW LEVEL SECURITY` enforced across all tables. Queries and mutations execute within scoped transactions using `withTenantContext` with `app.current_tenant_id`.
+3. **Application Query Scoping**: All SQL queries include explicit `WHERE tenant_id = :tenantId`.
+4. **Kafka Partition Keys**: All Kafka event messages are keyed by `tenantId:workflowId` ensuring strict ordering per tenant workflow partition.
+5. **Consumer Deduplication**: `notification-service` and `audit-service` enforce tenant-scoped idempotency tables to ignore duplicate event deliveries.
 
 ---
 
@@ -277,47 +399,48 @@ Every action across a workflow's lifecycle is published as a versioned **CloudEv
 
 ## 6. End-to-End Distributed Tracing & W3C Context Propagation
 
-Distributed tracing connects asynchronous microservices communicating via HTTP and Apache Kafka into unified end-to-end trace graphs:
+Distributed tracing connects client browser user actions, synchronous Fastify HTTP APIs, asynchronous PostgreSQL/Drizzle database queries, and Apache Kafka consumers into unified end-to-end trace graphs:
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Client as Web UI / Client
-    participant API as workflow-api (HTTP)
+    actor Client as Web Browser / Host App
+    participant API as workflow-api (Fastify :3000)
+    participant DB as PostgreSQL (workflow_db)
     participant Outbox as Outbox Relay
     participant Kafka as Kafka Broker (workflow.events)
-    participant Audit as audit-service (Consumer)
-    participant Notif as notification-service (Consumer)
+    participant Audit as audit-service (Consumer :3002)
+    participant Notif as notification-service (Consumer :3001)
     participant Jaeger as Jaeger OTLP Collector (:4318)
 
-    Client->>API: POST /api/v1/workflows/:id/approve
-    Note over API: Start Root Span (traceId: "1fa908e3...", spanId: "3e99ec29...")
-    API->>Outbox: Save to outbox (traceparent: "00-1fa908e3...-3e99ec29...-01")
-    API->>Jaeger: Export HTTP Root Span (34ms)
-    API-->>Client: 200 OK (Header: traceparent: 00-1fa908e3...)
+    Client->>Client: Generate W3C TraceContext (traceparent: 00-1fa908e3...-3e99ec29...-01)<br/>Attach x-correlation-id: req-mu9em...
+    Client->>API: POST /api/v1/workflows/:id/approve (with traceparent & tenant headers)
+    Note over API: Fastify Telemetry Plugin binds trace context<br/>Root Span: POST /api/v1/workflows/:id/approve
+    
+    API->>DB: Execute SQL Update via Drizzle (AsyncLocalStorage Context)
+    Note over API,DB: Child Span: db.query (db.system: postgresql, db.operation: UPDATE)
+    DB-->>API: Row updated + Outbox record inserted
+    
+    API->>Outbox: Outbox event prepared with traceparent header
+    API->>Jaeger: Export HTTP Root Span + Child DB Spans (OTLP)
+    API-->>Client: 200 OK (Exposed Headers: traceparent, x-correlation-id)
 
-    Outbox->>Kafka: Publish event with Kafka Header `traceparent`
+    Outbox->>Kafka: Publish event with Kafka Header `traceparent` & `correlationId`
     
     par Kafka Consumer: Audit Service
         Kafka->>Audit: Consume workflow.step_approved.v1
         Note over Audit: Read Kafka Header `traceparent`<br/>Start Child Span (parentSpanId: "3e99ec29...")
-        Audit->>Audit: Persist to audit_events
-        Audit->>Jaeger: Export Child Span (52ms)
+        Audit->>Audit: Persist to audit_events (Child DB Span: db.query INSERT)
+        Audit->>Jaeger: Export Consumer Span + DB Child Span
     and Kafka Consumer: Notification Service
         Kafka->>Notif: Consume workflow.step_approved.v1
         Note over Notif: Read Kafka Header `traceparent`<br/>Start Child Span (parentSpanId: "3e99ec29...")
-        Notif->>Notif: Create in-app notification
-        Notif->>Jaeger: Export Child Span (3ms)
+        Notif->>Notif: Create in-app notification & broadcast SSE
+        Notif->>Jaeger: Export Consumer Span
     end
 
-    Note over Jaeger: Unified Multi-Service Trace Tree Formed! (3 Spans across 3 microservices)
+    Note over Jaeger: Unified Multi-Service Trace Tree Formed! (5+ Spans across Browser, API, DB & Consumers)
 ```
-
-### Trace Span Hierarchy in Jaeger:
-When viewing an approval or submission trace in Jaeger UI (`http://localhost:16686`):
-1. **Root Span**: `workflow-api` &rarr; `POST /api/v1/workflows/:id/approve`
-2. **Child Span A**: `audit-service` &rarr; `Kafka Consume: workflow.step_approved.v1` (linked via `parentSpanId`)
-3. **Child Span B**: `notification-service` &rarr; `Kafka Consume: workflow.step_approved.v1` (linked via `parentSpanId`)
 
 ---
 
@@ -325,16 +448,15 @@ When viewing an approval or submission trace in Jaeger UI (`http://localhost:166
 
 | Component / Tool | Port (Local / K8s) | Working URL | Description |
 |---|---|---|---|
-| **Host Application (React + Vite)** | `5173` / `8080` | [http://localhost:5173](http://localhost:5173) | Main UI: Multi-step Expense management, Approvals inbox, Audit log, Notifications |
-| **Workflow Widget Playground** | `3003` | [http://localhost:3003](http://localhost:3003) | Standalone demo page for `<workflow-widget>` Web Component |
-| **Workflow API** | `3000` | [http://localhost:3000/ready](http://localhost:3000/ready) | Fastify REST API: Multi-step state machine, Outbox relay, Delegations & Idempotency |
-| **Notification Service** | `3001` | [http://localhost:3001/health](http://localhost:3001/health) | Kafka event consumer & multi-step notification query API |
-| **Audit Service** | `3002` | [http://localhost:3002/health](http://localhost:3002/health) | Kafka event consumer & immutable audit trail REST API |
-| **Kafka Web UI** | `8085` | [http://localhost:8085](http://localhost:8085) | Real-time Kafka topic inspector, consumer group lag monitor & message viewer |
-| **Jaeger Distributed Tracing** | `16686` | [http://localhost:16686](http://localhost:16686) | Visual distributed trace explorer (OTLP receiver on `:4318`) |
-| **Prometheus Server** | `9090` | [http://localhost:9090](http://localhost:9090) | Prometheus metrics dashboard (scrapes `/metrics`) |
-| **PostgreSQL Database** | `5433` | `localhost:5433` | Databases: `workflow_db`, `audit_db`, `pact_db` (User: `postgres`, Pass: `postgres`) |
-| **Pact Broker** | `9292` | [http://localhost:9292](http://localhost:9292) | Consumer-Driven Contract testing broker |
+| **Host Application (React + Vite)** | `5173` / `8080` | [http://localhost:8080](http://localhost:8080) | Main UI: Real-Time SSE Sync, Expenses, Parallel Approvals, Audit Log & W3C Tracing |
+| **Workflow API** | `3000` | [http://localhost:3000/ready](http://localhost:3000/ready) | Fastify REST API: Dynamic Rules (`/api/v1/rules`), Deep Probes (`/health/live`, `/health/ready`) & Outbox Relay |
+| **Notification Service** | `3001` | [http://localhost:3001/health](http://localhost:3001/health) | Kafka consumer, alerts API & SSE live stream (`/api/v1/stream`) |
+| **Audit Service** | `3002` | [http://localhost:3002/health](http://localhost:3002/health) | Kafka consumer, immutable audit trail & DLQ Replay API (`/api/v1/dlq/messages`) |
+| **Grafana Dashboards** | `3005` | [http://localhost:3005](http://localhost:3005) | Provisioned Dashboards: System Health, DB Pool & Outbox Reliability |
+| **Kafka Web UI** | `8085` | [http://localhost:8085](http://localhost:8085) | Real-time Kafka topic inspector, DLQ monitor & consumer group lag viewer |
+| **Jaeger Distributed Tracing** | `16686` | [http://localhost:16686](http://localhost:16686) | Visual distributed trace explorer (OTLP receiver on `:4318`) with DB query spans |
+| **Prometheus Server** | `9090` | [http://localhost:9090](http://localhost:9090) | Prometheus metrics dashboard & alerting rules (scrapes `/metrics`) |
+| **PostgreSQL Database** | `5433` | `localhost:5433` | Databases: `workflow_db`, `audit_db` (RLS Enforced, User: `postgres`, Pass: `postgres`) |
 
 ---
 
@@ -345,7 +467,7 @@ When viewing an approval or submission trace in Jaeger UI (`http://localhost:166
 | `npm run k8s:reload:ui` | Frontend (`host-app`) | **~3 seconds** | Compiles Vite locally and syncs directly into running NGINX pods via `kubectl cp` with zero downtime |
 | `npm run k8s:reload:api` | Backend (`workflow-api`) | **~15 seconds** | Rebuilds TypeScript backend, imports into containerd, and triggers rolling restart |
 | `npm run k8s:reload` | Full Cluster | **~45 seconds** | Rebuilds all services (`host-app`, `workflow-api`, `notification-service`, `audit-service`) and restarts pods |
-| `.\k8s\local\start-port-forwards.ps1` | All Port-Forwards | **~1 second** | Starts background tunnels for all 8 microservices, UI, Kafka UI, and PostgreSQL |
+| `.\k8s\local\start-port-forwards.ps1` | All Port-Forwards | **~1 second** | Starts background tunnels for all microservices, UI, Grafana, Kafka UI, and PostgreSQL |
 | `.\k8s\local\stop-port-forwards.ps1` | All Port-Forwards | **~1 second** | Stops all active `kubectl port-forward` background processes cleanly |
 
 ---
@@ -364,12 +486,14 @@ When viewing an approval or submission trace in Jaeger UI (`http://localhost:166
 
 The entire platform architecture is validated with automated tests:
 * **Contract Tests**: Fastify route OpenAPI/Pact contracts and CloudEvents JSON Schema validation (`schema-compatibility.test.ts`).
-* **Unit Tests**: Multi-step state machine, dynamic threshold routing, outbox relay logic, and delegation checks (`workflow.state-machine.test.ts`, `outbox.relay.test.ts`).
-* **Integration Tests**: Kafka consumer message processing, schema validation, and idempotency deduplication (`kafka-events.test.ts`, `workflow-lifecycle.integration.test.ts`).
-* **Security Tests**: Multi-tenant isolation test matrix (`tenant-isolation.test.ts`).
+* **Unit Tests**: Multi-step state machine, dynamic rules engine, parallel quorum evaluation, SSE manager, outbox relay logic, StructuredLogger, DB query spans, client W3C tracing, and Deep Health probes.
+* **Integration Tests**: Kafka consumer message processing, DLQ poison-pill isolation, and idempotency deduplication (`kafka-events.test.ts`, `kafka-dlq.integration.test.ts`, `workflow-lifecycle.integration.test.ts`).
+* **Security Tests**: Multi-tenant isolation test matrix and PostgreSQL Row-Level Security (RLS) enforcement suite (`tenant-isolation.test.ts`, `postgres-rls.test.ts`).
 
 Run the automated test suite with:
 ```bash
-npm run test
+npm test
 ```
+*(95 tests passed across 19 test suites).*
+
 

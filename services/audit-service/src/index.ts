@@ -1,6 +1,6 @@
 import { buildAuditApp } from './app.js';
 import { runAuditMigrations } from './db/migrate.js';
-import { AuditConsumer } from './consumer.js';
+import { auditConsumerInstance } from './consumer.js';
 
 const PORT = parseInt(process.env.PORT || '3002', 10);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -9,8 +9,7 @@ async function start() {
   try {
     await runAuditMigrations();
 
-    const consumer = new AuditConsumer();
-    await consumer.start();
+    await auditConsumerInstance.start();
 
     const app = await buildAuditApp();
     await app.listen({ port: PORT, host: HOST });

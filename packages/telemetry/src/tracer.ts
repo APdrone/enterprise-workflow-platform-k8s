@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { AsyncLocalStorage } from 'async_hooks';
 
 export interface SpanContext {
   traceId: string;
@@ -19,6 +20,34 @@ export interface Span {
   setAttribute: (key: string, value: string | number | boolean) => void;
   recordException: (err: Error) => void;
   toTraceparent: () => string;
+}
+
+export interface TraceContextStore {
+  span?: Span;
+  traceparent?: string;
+  tenantId?: string;
+}
+
+export const traceStorage = new AsyncLocalStorage<TraceContextStore>();
+
+export function runWithTraceContext<T>(
+  context: TraceContextStore,
+  fn: () => T
+): T {
+  return traceStorage.run(context, fn);
+}
+
+export function getActiveTraceContext(): TraceContextStore | undefined {
+  return traceStorage.getStore();
+}
+
+export function getActiveSpan(): Span | undefined {
+  return traceStorage.getStore()?.span;
+}
+
+export function getActiveTraceparent(): string | undefined {
+  const store = traceStorage.getStore();
+  return store?.traceparent || store?.span?.toTraceparent();
 }
 
 export class Tracer {
@@ -126,7 +155,7 @@ export class Tracer {
                     spanId: span.context.spanId,
                     parentSpanId: span.context.parentSpanId,
                     name: span.name,
-                    kind: 1, // SPAN_KIND_INTERNAL
+                    kind: span.name.startsWith('db:') ? 3 : 1, // SPAN_KIND_CLIENT (3) for DB, SPAN_KIND_INTERNAL (1) for general
                     startTimeUnixNano: `${span.startTime}000000`,
                     endTimeUnixNano: `${Date.now()}000000`,
                     attributes: Object.entries(span.attributes).map(([key, val]) => ({
@@ -164,6 +193,177 @@ export class Tracer {
   }
 }
 
-export function getTracer(serviceName: string): Tracer {
-  return new Tracer(serviceName);
+/**
+ * Extract SQL operation name from SQL text
+ */
+export function extractSqlOperation(sql: string): string {
+  if (!sql || typeof sql !== 'string') return 'QUERY';
+  const trimmed = sql.trim().replace(/^--.*$/gm, '').trim();
+  const firstWord = trimmed.split(/\s+/)[0]?.toUpperCase() || 'QUERY';
+  const validOps = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'BEGIN', 'COMMIT', 'ROLLBACK', 'SET', 'SHOW'];
+  return validOps.includes(firstWord) ? firstWord : 'QUERY';
 }
+
+/**
+ * Automatically instrument a pg.Pool or pg.Client instance to generate child DB spans for Jaeger/OTLP
+ */
+export function instrumentPgPool(
+  pool: any,
+  options: { serviceName?: string; dbName?: string } = {}
+): void {
+  if (!pool || pool.__isTracingInstrumented) return;
+  pool.__isTracingInstrumented = true;
+
+  const serviceName = options.serviceName || 'workflow-platform';
+  const dbName = options.dbName || 'postgres';
+  const tracer = getTracer(serviceName);
+
+  // Wrap pool.query
+  if (typeof pool.query === 'function') {
+    const originalPoolQuery = pool.query.bind(pool);
+    pool.query = function (this: any, ...args: any[]) {
+      const parentTraceparent = getActiveTraceparent();
+      let queryText = '';
+      if (typeof args[0] === 'string') {
+        queryText = args[0];
+      } else if (args[0] && typeof args[0].text === 'string') {
+        queryText = args[0].text;
+      }
+
+      const op = extractSqlOperation(queryText);
+      const span = tracer.startSpan(`db:${op}`, parentTraceparent);
+      span.setAttribute('db.system', 'postgresql');
+      span.setAttribute('db.name', dbName);
+      span.setAttribute('db.operation', op);
+      span.setAttribute('db.statement', queryText.length > 500 ? queryText.slice(0, 500) + '...' : queryText);
+
+      const lastArg = args[args.length - 1];
+      if (typeof lastArg === 'function') {
+        const cb = lastArg;
+        args[args.length - 1] = function (err: any, res: any) {
+          if (err) span.recordException(err);
+          span.end();
+          return cb(err, res);
+        };
+        return originalPoolQuery.apply(this, args);
+      }
+
+      const resultPromise = originalPoolQuery.apply(this, args);
+      if (resultPromise && typeof resultPromise.then === 'function') {
+        return resultPromise
+          .then((res: any) => {
+            span.end();
+            return res;
+          })
+          .catch((err: any) => {
+            span.recordException(err);
+            span.end();
+            throw err;
+          });
+      }
+      span.end();
+      return resultPromise;
+    };
+  }
+
+  // Wrap client queries on pool.connect
+  if (typeof pool.connect === 'function') {
+    const originalConnect = pool.connect.bind(pool);
+    pool.connect = async function (this: any, ...connectArgs: any[]) {
+      const client = await originalConnect.apply(this, connectArgs);
+      if (client && !client.__isTracingInstrumented && typeof client.query === 'function') {
+        client.__isTracingInstrumented = true;
+        const originalClientQuery = client.query.bind(client);
+        client.query = function (this: any, ...args: any[]) {
+          const parentTraceparent = getActiveTraceparent();
+          let queryText = '';
+          if (typeof args[0] === 'string') {
+            queryText = args[0];
+          } else if (args[0] && typeof args[0].text === 'string') {
+            queryText = args[0].text;
+          }
+
+          const op = extractSqlOperation(queryText);
+          const span = tracer.startSpan(`db:${op}`, parentTraceparent);
+          span.setAttribute('db.system', 'postgresql');
+          span.setAttribute('db.name', dbName);
+          span.setAttribute('db.operation', op);
+          span.setAttribute('db.statement', queryText.length > 500 ? queryText.slice(0, 500) + '...' : queryText);
+
+          const lastArg = args[args.length - 1];
+          if (typeof lastArg === 'function') {
+            const cb = lastArg;
+            args[args.length - 1] = function (err: any, res: any) {
+              if (err) span.recordException(err);
+              span.end();
+              return cb(err, res);
+            };
+            return originalClientQuery.apply(this, args);
+          }
+
+          const resultPromise = originalClientQuery.apply(this, args);
+          if (resultPromise && typeof resultPromise.then === 'function') {
+            return resultPromise
+              .then((res: any) => {
+                span.end();
+                return res;
+              })
+              .catch((err: any) => {
+                span.recordException(err);
+                span.end();
+                throw err;
+              });
+          }
+          span.end();
+          return resultPromise;
+        };
+      }
+      return client;
+    };
+  }
+}
+
+/**
+ * Explicit helper to trace any asynchronous database query/transaction
+ */
+export async function traceDbQuery<T>(
+  options: {
+    serviceName?: string;
+    dbName?: string;
+    statement: string;
+    operation?: string;
+    parentTraceparent?: string;
+  },
+  fn: () => Promise<T>
+): Promise<T> {
+  const serviceName = options.serviceName || 'workflow-platform';
+  const tracer = getTracer(serviceName);
+  const parentTraceparent = options.parentTraceparent || getActiveTraceparent();
+  const op = options.operation || extractSqlOperation(options.statement);
+
+  const span = tracer.startSpan(`db:${op}`, parentTraceparent);
+  span.setAttribute('db.system', 'postgresql');
+  span.setAttribute('db.name', options.dbName || 'postgres');
+  span.setAttribute('db.operation', op);
+  span.setAttribute('db.statement', options.statement);
+
+  try {
+    const result = await fn();
+    return result;
+  } catch (err: any) {
+    span.recordException(err);
+    throw err;
+  } finally {
+    span.end();
+  }
+}
+
+const tracerInstances = new Map<string, Tracer>();
+
+export function getTracer(serviceName: string): Tracer {
+  if (!tracerInstances.has(serviceName)) {
+    tracerInstances.set(serviceName, new Tracer(serviceName));
+  }
+  return tracerInstances.get(serviceName)!;
+}
+

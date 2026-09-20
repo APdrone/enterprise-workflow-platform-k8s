@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { eq, and, desc, count, asc } from 'drizzle-orm';
 import {
   Workflow,
+  WorkflowStatus,
   WorkflowStep,
   CreateWorkflowDTO,
   SubmitWorkflowDTO,
@@ -16,101 +17,9 @@ import { db } from '../db/client.js';
 import { workflows, workflowSteps, outboxEvents } from '../db/schema.js';
 import { outboxRelayService } from './outbox.relay.js';
 import { delegationService } from './delegation.service.js';
+import { rulesEngineService } from './rules.engine.js';
 
 export class WorkflowService {
-  /**
-   * Evaluates dynamic approval hierarchy based on type and amount thresholds
-   */
-  private generateDefaultSteps(
-    workflowId: string,
-    tenantId: string,
-    dto: CreateWorkflowDTO
-  ): Array<{ id: string; workflowId: string; tenantId: string; stepOrder: number; stepRole: string; approverId?: string | null; status: string }> {
-    if (dto.customSteps && dto.customSteps.length > 0) {
-      return dto.customSteps.map((s, idx) => ({
-        id: uuidv4(),
-        workflowId,
-        tenantId,
-        stepOrder: s.stepOrder || idx + 1,
-        stepRole: s.stepRole || 'GENERAL_APPROVER',
-        approverId: s.approverId || null,
-        status: 'PENDING',
-      }));
-    }
-
-    const amount = Number(dto.amount || 0);
-
-    // Tier 1: Small expenses (< 10,000 JPY / USD) -> Single Lead approval
-    if (amount < 10000) {
-      return [
-        {
-          id: uuidv4(),
-          workflowId,
-          tenantId,
-          stepOrder: 1,
-          stepRole: 'TEAM_LEAD',
-          approverId: dto.approverId || null,
-          status: 'PENDING',
-        },
-      ];
-    }
-
-    // Tier 2: Mid-level expenses (10,000 - 100,000) -> Team Lead + Dept Manager
-    if (amount <= 100000) {
-      return [
-        {
-          id: uuidv4(),
-          workflowId,
-          tenantId,
-          stepOrder: 1,
-          stepRole: 'TEAM_LEAD',
-          approverId: dto.approverId || null,
-          status: 'PENDING',
-        },
-        {
-          id: uuidv4(),
-          workflowId,
-          tenantId,
-          stepOrder: 2,
-          stepRole: 'DEPT_MANAGER',
-          approverId: null,
-          status: 'PENDING',
-        },
-      ];
-    }
-
-    // Tier 3: High-value expenses (> 100,000) -> Team Lead + Dept Manager + Finance Director
-    return [
-      {
-        id: uuidv4(),
-        workflowId,
-        tenantId,
-        stepOrder: 1,
-        stepRole: 'TEAM_LEAD',
-        approverId: dto.approverId || null,
-        status: 'PENDING',
-      },
-      {
-        id: uuidv4(),
-        workflowId,
-        tenantId,
-        stepOrder: 2,
-        stepRole: 'DEPT_MANAGER',
-        approverId: null,
-        status: 'PENDING',
-      },
-      {
-        id: uuidv4(),
-        workflowId,
-        tenantId,
-        stepOrder: 3,
-        stepRole: 'FINANCE_DIRECTOR',
-        approverId: null,
-        status: 'PENDING',
-      },
-    ];
-  }
-
   async createWorkflow(
     tenantId: string,
     requesterId: string,
@@ -120,7 +29,11 @@ export class WorkflowService {
     const id = uuidv4();
     const now = new Date();
 
-    const stepsToCreate = this.generateDefaultSteps(id, tenantId, dto);
+    // 1. Evaluate steps using the Rules Engine (Dynamic Matrix & Parallel Rules)
+    const stepsToCreate = await rulesEngineService.evaluateSteps(tenantId, id, dto);
+
+    // Calculate total distinct step levels
+    const maxStepOrder = stepsToCreate.reduce((max, s) => Math.max(max, s.stepOrder), 1);
 
     const newRecord = {
       id,
@@ -135,9 +48,9 @@ export class WorkflowService {
       status: 'DRAFT',
       approverId: dto.approverId || null,
       currentStepOrder: 1,
-      totalSteps: stepsToCreate.length,
+      totalSteps: maxStepOrder,
       rejectionReason: null,
-      metadata: dto.metadata || {},
+      metadata: dto.metadata || (dto.department ? { department: dto.department } : {}),
       createdAt: now,
       updatedAt: now,
     };
@@ -155,6 +68,8 @@ export class WorkflowService {
             stepRole: s.stepRole,
             approverId: s.approverId || null,
             status: s.status as any,
+            policy: s.policy || 'ALL_MUST_APPROVE',
+            parallelGroup: s.parallelGroup || null,
             createdAt: now,
           })) as any
         );
@@ -235,7 +150,7 @@ export class WorkflowService {
       .select()
       .from(workflowSteps)
       .where(and(eq(workflowSteps.workflowId, workflowId), eq(workflowSteps.tenantId, tenantId)))
-      .orderBy(asc(workflowSteps.stepOrder));
+      .orderBy(asc(workflowSteps.stepOrder), asc(workflowSteps.createdAt));
 
     return stepRecords.map((s) => ({
       id: s.id,
@@ -245,6 +160,8 @@ export class WorkflowService {
       stepRole: s.stepRole,
       approverId: s.approverId || undefined,
       status: s.status as any,
+      policy: (s.policy as any) || 'ALL_MUST_APPROVE',
+      parallelGroup: s.parallelGroup || undefined,
       actedBy: s.actedBy || undefined,
       actedAt: s.actedAt ? s.actedAt.toISOString() : undefined,
       comment: s.comment || undefined,
@@ -354,52 +271,120 @@ export class WorkflowService {
 
     const currentStepOrder = existing.currentStepOrder || 1;
     const totalSteps = existing.totalSteps || 1;
-    const currentStep = existing.steps?.find((s) => s.stepOrder === currentStepOrder);
+    const allSteps = existing.steps || [];
+
+    // Find all steps at currentStepOrder
+    const currentOrderSteps = allSteps.filter((s) => s.stepOrder === currentStepOrder);
+    if (currentOrderSteps.length === 0) {
+      const error: any = new Error(`No active steps found at order ${currentStepOrder}`);
+      error.statusCode = 422;
+      error.code = 'INVALID_STATE';
+      throw error;
+    }
+
+    // Identify the specific step being approved
+    let targetStep: WorkflowStep | undefined;
+    if (dto.stepId) {
+      targetStep = currentOrderSteps.find((s) => s.id === dto.stepId);
+    } else {
+      // Find matching step by approverId or first pending step at this order
+      targetStep = currentOrderSteps.find((s) => s.status === 'PENDING' && (s.approverId === actorId || !s.approverId));
+      if (!targetStep) {
+        targetStep = currentOrderSteps.find((s) => s.status === 'PENDING');
+      }
+    }
+
+    if (!targetStep || targetStep.status !== 'PENDING') {
+      const error: any = new Error('No pending step available for approval by this actor.');
+      error.statusCode = 422;
+      error.code = 'NO_PENDING_STEP';
+      throw error;
+    }
 
     // Check delegation / authorization
     const authCheck = await delegationService.isAuthorizedApprover(
       tenantId,
       actorId,
-      currentStep?.approverId || existing.approverId
+      targetStep.approverId || existing.approverId
     );
 
     const now = new Date();
-    const isFinalStep = currentStepOrder >= totalSteps;
-    const nextStatus = isFinalStep ? 'APPROVED' : 'PENDING';
-    const eventType = isFinalStep ? 'workflow.approved.v1' : 'workflow.step_approved.v1';
 
-    // 1. Update current step in DB
-    if (currentStep) {
-      await db
-        .update(workflowSteps)
-        .set({
-          status: 'APPROVED',
-          actedBy: actorId,
-          actedAt: now,
-          delegatedFrom: authCheck.isDelegated ? authCheck.delegatedFrom : null,
-          comment: dto.comment || null,
-        })
-        .where(
-          and(
-            eq(workflowSteps.workflowId, workflowId),
-            eq(workflowSteps.tenantId, tenantId),
-            eq(workflowSteps.stepOrder, currentStepOrder)
-          )
-        );
+    // 1. Mark this target step as APPROVED
+    await db
+      .update(workflowSteps)
+      .set({
+        status: 'APPROVED',
+        actedBy: actorId,
+        actedAt: now,
+        delegatedFrom: authCheck.isDelegated ? authCheck.delegatedFrom : null,
+        comment: dto.comment || null,
+      })
+      .where(and(eq(workflowSteps.id, targetStep.id), eq(workflowSteps.tenantId, tenantId)));
+
+    // 2. Evaluate Parallel Quorum for currentStepOrder
+    const policy = targetStep.policy || 'ALL_MUST_APPROVE';
+    let isCurrentOrderFullyResolved = false;
+
+    if (policy === 'ANY_CAN_APPROVE') {
+      // First-responder policy: One approval satisfies the whole step order!
+      isCurrentOrderFullyResolved = true;
+
+      // Auto-skip other pending sibling steps in the same stepOrder
+      const otherSiblingSteps = currentOrderSteps.filter((s) => s.id !== targetStep!.id && s.status === 'PENDING');
+      for (const sibling of otherSiblingSteps) {
+        await db
+          .update(workflowSteps)
+          .set({
+            status: 'SKIPPED',
+            actedBy: 'SYSTEM',
+            actedAt: now,
+            comment: `Auto-skipped: Sibling step approved by ${actorId} (ANY_CAN_APPROVE policy)`,
+          })
+          .where(and(eq(workflowSteps.id, sibling.id), eq(workflowSteps.tenantId, tenantId)));
+      }
+    } else {
+      // ALL_MUST_APPROVE policy: Check if ALL sibling steps are now APPROVED
+      const remainingPendingSiblings = currentOrderSteps.filter(
+        (s) => s.id !== targetStep!.id && s.status === 'PENDING'
+      );
+      isCurrentOrderFullyResolved = remainingPendingSiblings.length === 0;
     }
 
-    // 2. Update workflow record
+    // 3. Determine next workflow state
+    let nextStatus: WorkflowStatus = existing.status;
+    let nextStepOrder = currentStepOrder;
+    let eventType: string;
+
+    if (isCurrentOrderFullyResolved) {
+      const isFinalStep = currentStepOrder >= totalSteps;
+      if (isFinalStep) {
+        nextStatus = 'APPROVED';
+        eventType = 'workflow.approved.v1';
+      } else {
+        nextStatus = 'PENDING';
+        nextStepOrder = currentStepOrder + 1;
+        eventType = 'workflow.step_approved.v1';
+      }
+    } else {
+      // Parallel step approved, but waiting for remaining parallel reviewers
+      nextStatus = 'PENDING';
+      nextStepOrder = currentStepOrder;
+      eventType = 'workflow.step_approved.v1';
+    }
+
+    // 4. Update workflow record
     await db
       .update(workflows)
       .set({
         status: nextStatus,
-        approverId: isFinalStep ? actorId : existing.approverId,
-        currentStepOrder: isFinalStep ? currentStepOrder : currentStepOrder + 1,
+        approverId: nextStatus === 'APPROVED' ? actorId : existing.approverId,
+        currentStepOrder: nextStepOrder,
         updatedAt: now,
       })
       .where(and(eq(workflows.id, workflowId), eq(workflows.tenantId, tenantId)));
 
-    // 3. Create Outbox event
+    // 5. Create Outbox event
     const eventId = uuidv4();
     const event: WorkflowKafkaEvent = {
       id: eventId,
@@ -422,12 +407,18 @@ export class WorkflowService {
         currentStatus: nextStatus as any,
         currentStepOrder,
         totalSteps,
-        stepRole: currentStep?.stepRole,
+        stepRole: targetStep.stepRole,
         isDelegated: authCheck.isDelegated,
         delegatedFrom: authCheck.delegatedFrom,
         comment: dto.comment,
         timestamp: now.toISOString(),
-        metadata: existing.metadata,
+        metadata: {
+          ...existing.metadata,
+          policy,
+          parallelGroup: targetStep.parallelGroup,
+          stepId: targetStep.id,
+          stepResolved: isCurrentOrderFullyResolved,
+        },
       },
     };
 
@@ -473,17 +464,23 @@ export class WorkflowService {
     }
 
     const currentStepOrder = existing.currentStepOrder || 1;
-    const currentStep = existing.steps?.find((s) => s.stepOrder === currentStepOrder);
+    const currentSteps = existing.steps?.filter((s) => s.stepOrder === currentStepOrder) || [];
+    
+    // Target step
+    let targetStep = dto.stepId
+      ? currentSteps.find((s) => s.id === dto.stepId)
+      : currentSteps.find((s) => s.status === 'PENDING');
+
     const authCheck = await delegationService.isAuthorizedApprover(
       tenantId,
       actorId,
-      currentStep?.approverId || existing.approverId
+      targetStep?.approverId || existing.approverId
     );
 
     const now = new Date();
 
-    // 1. Update step
-    if (currentStep) {
+    // 1. Mark target step as REJECTED
+    if (targetStep) {
       await db
         .update(workflowSteps)
         .set({
@@ -493,16 +490,24 @@ export class WorkflowService {
           delegatedFrom: authCheck.isDelegated ? authCheck.delegatedFrom : null,
           comment: dto.reason,
         })
-        .where(
-          and(
-            eq(workflowSteps.workflowId, workflowId),
-            eq(workflowSteps.tenantId, tenantId),
-            eq(workflowSteps.stepOrder, currentStepOrder)
-          )
-        );
+        .where(and(eq(workflowSteps.id, targetStep.id), eq(workflowSteps.tenantId, tenantId)));
     }
 
-    // 2. Update workflow
+    // 2. Mark any other pending parallel steps as SKIPPED
+    const otherPending = currentSteps.filter((s) => s.id !== targetStep?.id && s.status === 'PENDING');
+    for (const step of otherPending) {
+      await db
+        .update(workflowSteps)
+        .set({
+          status: 'SKIPPED',
+          actedBy: 'SYSTEM',
+          actedAt: now,
+          comment: `Auto-skipped: Parallel step rejected by ${actorId}`,
+        })
+        .where(and(eq(workflowSteps.id, step.id), eq(workflowSteps.tenantId, tenantId)));
+    }
+
+    // 3. Update workflow to REJECTED
     await db
       .update(workflows)
       .set({
@@ -513,7 +518,7 @@ export class WorkflowService {
       })
       .where(and(eq(workflows.id, workflowId), eq(workflows.tenantId, tenantId)));
 
-    // 3. Outbox event
+    // 4. Outbox event
     const eventId = uuidv4();
     const event: WorkflowKafkaEvent = {
       id: eventId,

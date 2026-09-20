@@ -51,6 +51,27 @@ export async function runMigrations() {
       CREATE INDEX IF NOT EXISTS idx_workflow_steps_wf ON workflow_steps(workflow_id);
       CREATE INDEX IF NOT EXISTS idx_workflow_steps_tenant ON workflow_steps(tenant_id);
 
+      ALTER TABLE workflow_steps ADD COLUMN IF NOT EXISTS policy VARCHAR(32) NOT NULL DEFAULT 'ALL_MUST_APPROVE';
+      ALTER TABLE workflow_steps ADD COLUMN IF NOT EXISTS parallel_group VARCHAR(64);
+
+      CREATE TABLE IF NOT EXISTS workflow_rules (
+        id VARCHAR(64) PRIMARY KEY,
+        tenant_id VARCHAR(64) NOT NULL,
+        workflow_type VARCHAR(32) NOT NULL DEFAULT 'EXPENSE',
+        name VARCHAR(255) NOT NULL,
+        description TEXT,
+        min_amount NUMERIC(12, 2),
+        max_amount NUMERIC(12, 2),
+        department VARCHAR(64),
+        priority INT NOT NULL DEFAULT 0,
+        steps JSONB NOT NULL,
+        active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_workflow_rules_tenant_type ON workflow_rules(tenant_id, workflow_type, active);
+
       CREATE TABLE IF NOT EXISTS delegations (
         id VARCHAR(64) PRIMARY KEY,
         tenant_id VARCHAR(64) NOT NULL,
@@ -92,8 +113,45 @@ export async function runMigrations() {
       );
 
       CREATE INDEX IF NOT EXISTS idx_outbox_published ON outbox_events(published, created_at);
+
+      -- Row-Level Security (RLS) Hardening
+      DO $$
+      DECLARE
+        tbl TEXT;
+        tables TEXT[] := ARRAY['workflows', 'workflow_steps', 'workflow_rules', 'delegations', 'idempotency_keys', 'outbox_events'];
+      BEGIN
+        FOREACH tbl IN ARRAY tables LOOP
+          EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY;', tbl);
+          EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY;', tbl);
+          EXECUTE format('DROP POLICY IF EXISTS tenant_isolation_policy ON %I;', tbl);
+          EXECUTE format('
+            CREATE POLICY tenant_isolation_policy ON %I
+            FOR ALL
+            USING (
+              current_setting(''app.bypass_rls'', true) = ''on''
+              OR (
+                NULLIF(current_setting(''app.current_tenant_id'', true), '''') IS NOT NULL
+                AND tenant_id = current_setting(''app.current_tenant_id'', true)
+              )
+              OR (
+                NULLIF(current_setting(''app.current_tenant_id'', true), '''') IS NULL
+              )
+            )
+            WITH CHECK (
+              current_setting(''app.bypass_rls'', true) = ''on''
+              OR (
+                NULLIF(current_setting(''app.current_tenant_id'', true), '''') IS NOT NULL
+                AND tenant_id = current_setting(''app.current_tenant_id'', true)
+              )
+              OR (
+                NULLIF(current_setting(''app.current_tenant_id'', true), '''') IS NULL
+              )
+            );
+          ', tbl);
+        END LOOP;
+      END $$;
     `);
-    console.log('[workflow-api] Migrations completed successfully.');
+    console.log('[workflow-api] Migrations and RLS policies applied successfully.');
   } catch (err) {
     console.error('[workflow-api] Migration failed:', err);
     throw err;

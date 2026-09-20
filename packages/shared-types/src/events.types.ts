@@ -41,3 +41,33 @@ export interface CloudEventEnvelope<T = WorkflowEventData> {
 }
 
 export type WorkflowKafkaEvent = CloudEventEnvelope<WorkflowEventData>;
+
+export type DLQErrorType =
+  | 'SCHEMA_VALIDATION_ERROR'
+  | 'UNPARSEABLE_JSON'
+  | 'MAX_RETRIES_EXCEEDED'
+  | 'PROCESSING_ERROR';
+
+export interface DLQRecord {
+  id: string;
+  originalTopic: string;
+  originalKey?: string;
+  payload: unknown;
+  errorType: DLQErrorType;
+  errorMessage: string;
+  stackTrace?: string;
+  retryCount: number;
+  failedAt: string;
+  tenantId?: string;
+  workflowId?: string;
+}
+
+export interface DLQHeaders {
+  'x-original-topic': string;
+  'x-retry-count': string;
+  'x-error-type': DLQErrorType;
+  'x-error-message': string;
+  'x-failed-at': string;
+  'tenant-id'?: string;
+  'x-correlation-id'?: string;
+}

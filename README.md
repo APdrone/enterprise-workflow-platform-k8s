@@ -22,28 +22,28 @@ A production-grade, event-driven microservices platform engineered for **multi-t
 ```mermaid
 flowchart TD
     subgraph Frontend["Frontend & Microfrontends Layer"]
-        HostApp["🖥️ Host Web App (Port 8080 / 5173)\nReact + Vite Dashboard"]
+        HostApp["🖥️ Host Web App (Port 8080 / 5173)\nReact + Vite Dashboard (SSE Live Sync Context)"]
         Widget["🧩 Workflow Widget (Port 3003)\nFramework-Agnostic Web Component (Shadow DOM)"]
     end
 
     subgraph API["Workflow Gateway & Core Service"]
-        WFAPI["⚙️ Workflow API (Port 3000)\nFastify + State Machine Engine"]
+        WFAPI["⚙️ Workflow API (Port 3000)\nFastify + State Machine + Dynamic Rules Engine"]
         OutboxRelay["🔄 Transactional Outbox Relay\n(Immediate Dispatch + 1s Resilience Poller)"]
     end
 
-    subgraph DB["Database Layer (PostgreSQL 16)"]
-        WFDB[("🗄️ workflow_db\n(workflows, workflow_steps, outbox_events, idempotency_keys)")]
-        AuditDB[("🗄️ audit_db\n(audit_events immutable ledger)")]
+    subgraph DB["Database Layer (PostgreSQL 16 + RLS Hardening)"]
+        WFDB[("🗄️ workflow_db (RLS Enabled)\n(workflows, workflow_steps, workflow_rules, outbox_events, idempotency_keys)")]
+        AuditDB[("🗄️ audit_db (RLS Enabled)\n(audit_events immutable ledger, dlq_messages)")]
     end
 
     subgraph Messaging["Distributed Event Stream (Apache Kafka)"]
-        Broker["📨 Kafka Broker (Port 9092)\nTopic: workflow.events (3 Partitions)"]
-        KafkaUI["📊 Kafka UI (Port 8085)\nTopic & Consumer Group Inspector"]
+        Broker["📨 Kafka Broker (Port 9092)\nTopics: workflow.events, workflow.events.retry, workflow.events.dlq"]
+        KafkaUI["📊 Kafka UI (Port 8085)\nTopic, DLQ & Consumer Group Inspector"]
     end
 
     subgraph Consumers["Downstream Microservices"]
-        NotifSvc["🔔 Notification Service (Port 3001)\nIdempotent Alerts Consumer & Query API"]
-        AuditSvc["📜 Audit Service (Port 3002)\nCloudEvents 1.0 Compliance Consumer & API"]
+        NotifSvc["🔔 Notification Service (Port 3001)\nSSE Real-Time Broadcaster & Idempotent Alerts Consumer"]
+        AuditSvc["📜 Audit Service (Port 3002)\nCloudEvents Consumer, DLQ Sink & Replay API"]
     end
 
     subgraph Observability["Observability & Distributed Tracing"]
@@ -53,12 +53,15 @@ flowchart TD
 
     HostApp -->|REST API + Tenant Headers| WFAPI
     Widget -->|Custom Events & REST| WFAPI
-    WFAPI -->|1. Atomic Transaction (Workflow + Outbox)| WFDB
+    HostApp <-->|SSE Stream (/api/v1/stream)| NotifSvc
+    WFAPI -->|1. Atomic Transaction with RLS Scoping| WFDB
     WFDB -->|2. Poll Unpublished Events| OutboxRelay
     OutboxRelay -->|3. Publish CloudEvent with traceparent| Broker
     Broker -->|Consume workflow.events| NotifSvc
     Broker -->|Consume workflow.events| AuditSvc
+    Broker -.->|Poison Pills / Retry Exhaustion| Broker
     AuditSvc -->|Persist Audit Record| AuditDB
+    AuditSvc -->|Dead-Letter Sink| AuditDB
     Broker -.->|Inspect Partitions & Lag| KafkaUI
 
     WFAPI -.->|OTLP HTTP Trace Export| Jaeger
@@ -73,25 +76,31 @@ flowchart TD
 
 ## 🎯 Key Architectural Capabilities
 
-1. **Transactional Outbox Pattern (Dual-Write Resilience)**:
+1. **Real-Time Live Sync (Server-Sent Events / SSE)**:
+   - Zero-polling instant reactivity: State changes, approvals, and submissions stream directly to connected web clients via `GET /api/v1/stream`.
+   - Multi-tenant connection management with 20s heartbeat keep-alives and live toast notifications.
+2. **Kafka Dead Letter Queue (DLQ) & Consumer Resilience**:
+   - Resilient multi-topic topology: `workflow.events` $\rightarrow$ `workflow.events.retry` (3 exponential backoff retries) $\rightarrow$ `workflow.events.dlq`.
+   - Poison-pill isolation: Malformed JSON or schema-violating events are intercepted and routed to DLQ without blocking consumer partitions.
+   - DLQ persistence & replay REST APIs (`GET /api/v1/dlq/messages`, `POST /api/v1/dlq/replay/:id`).
+3. **Configurable Workflow Rules & Parallel Approvals (AND/OR Quorums)**:
+   - Tenant-scoped dynamic rules engine (`workflow_rules` table and `/api/v1/rules` API) supporting priority-based rule matching by workflow type, amount thresholds, and department.
+   - **`ALL_MUST_APPROVE` (AND Quorum)**: Unanimous multi-reviewer approval required on the same step order.
+   - **`ANY_CAN_APPROVE` (OR Quorum)**: First-responder approval auto-skips sibling parallel steps.
+   - Automatic parallel reviewer dispatch (`Finance Director` + `VP Approval`) for high-value requests (> $100k).
+4. **Database Security Hardening (PostgreSQL Row-Level Security / RLS)**:
+   - Hardware/engine-level tenant isolation: `FORCE ROW LEVEL SECURITY` on all tenant-scoped tables.
+   - Dynamic session policy (`app.current_tenant_id`) with `WITH CHECK` constraints physically blocking unauthorized cross-tenant writes at the database kernel level.
+   - Connection pool transaction helper `withTenantContext` ensuring zero context leakage across pooled physical connections.
+5. **Transactional Outbox Pattern (Dual-Write Resilience)**:
    - Workflow state updates and outbound CloudEvents are committed in a **single atomic PostgreSQL ACID transaction**.
    - Zero event loss during Kafka outages: API returns `200 OK` immediately while events accumulate safely in `outbox_events` (`published = false`).
    - The Outbox Relay automatically drains the backlog with exponential backoff once Kafka recovers.
-2. **End-to-End Distributed Tracing (W3C TraceContext)**:
-   - Root HTTP span initialized on `POST /api/v1/workflows/:id/approve` or `submit`.
-   - `traceparent` (`00-{traceId}-{spanId}-01`) persisted into outbox records and injected into Kafka message headers.
-   - `audit-service` and `notification-service` consumers extract the header to attach child spans (`parentSpanId`), forming unified 3-service trace graphs in **Jaeger UI**.
-3. **Multi-Tier Dynamic Approval Hierarchy**:
-   - Dynamic threshold evaluation based on expense amount:
-     - **< $10,000**: Single-tier (`Team Lead`).
-     - **$10,000 – $100,000**: Two-tier (`Team Lead` $\rightarrow$ `Dept Manager`).
-     - **> $100,000**: Three-tier (`Team Lead` $\rightarrow$ `Dept Manager` $\rightarrow$ `Finance Director`).
-4. **Multi-Tenant Security & Isolation**:
-   - Strict tenant boundary enforcement (`x-tenant-id` header validation).
-   - SQL query scoping (`WHERE tenant_id = :tenantId`) and Kafka message partition keys (`tenantId:workflowId`).
-5. **Idempotency & Concurrent Conflict Protection**:
+6. **End-to-End Distributed Tracing (W3C TraceContext)**:
+   - Root HTTP span initialized on API actions and propagated via W3C `traceparent` headers through PostgreSQL Outbox records and Kafka headers to downstream consumer child spans in **Jaeger UI**.
+7. **Idempotency & Concurrent Conflict Protection**:
    - Native `idempotency-key` header pre-handler caches and deduplicates requests (`x-idempotent-replay: true`).
-6. **Microfrontend Web Component (`<workflow-widget>`)**:
+8. **Microfrontend Web Component (`<workflow-widget>`)**:
    - Zero-dependency custom element encapsulated in Shadow DOM, embeddable inside any host application (React, Angular, Vue, or Vanilla HTML).
 
 ---
@@ -151,19 +160,21 @@ All backend services are built with **Fastify, Node.js, and TypeScript**:
 * **Delegation / Proxy Approver Support**:
   * Approvers can grant temporary approval authority to delegatees with `validFrom` and `validUntil` date ranges.
 
-### 5. 🗄️ Database & Persistence Layer
-PostgreSQL 16 managed with **Drizzle ORM** (Port `5433`):
+### 5. 🗄️ Database & Persistence Layer (PostgreSQL 16 + RLS)
+PostgreSQL 16 managed with **Drizzle ORM** (Port `5433` / Database `workflow_db`, `audit_db`) with **Row-Level Security (RLS)** strictly enforced on all multi-tenant tables:
 * **Databases**:
   * `workflow_db`: Operational database for `workflow-api`.
-  * `audit_db`: Dedicated append-only compliance database for `audit-service`.
+  * `audit_db`: Dedicated append-only compliance & DLQ database for `audit-service`.
   * `pact_db`: Pact Broker storage for contract test verification.
 * **Key Tables** ([`services/workflow-api/src/db/schema.ts`](./services/workflow-api/src/db/schema.ts)):
-  * `workflows`: Stores workflow metadata, amount, current state, current step order, total steps.
-  * `workflow_steps`: Stores multi-step approval chain, designated roles, approvers, action timestamps, comments.
-  * `delegations`: Stores active out-of-office delegation rules.
-  * `idempotency_keys`: Stores request hashes, processing status, and cached response payloads.
-  * `outbox_events`: Stores unpublished CloudEvents, publication status (`published = false/true`), and retry counts.
-  * `audit_events` (in `audit_db`): Stores immutable CloudEvent payloads, actors, event types, and timestamps.
+  * `workflows`: Stores workflow metadata, amount, current state, current step order, total steps (RLS enabled).
+  * `workflow_steps`: Stores multi-step approval chain, designated roles, approvers, action timestamps, comments, `policy` (`ALL_MUST_APPROVE`/`ANY_CAN_APPROVE`), and `parallel_group` (RLS enabled).
+  * `workflow_rules`: Stores dynamic routing matrices, tenant-scoped thresholds, priority, and step definitions (RLS enabled).
+  * `delegations`: Stores active out-of-office delegation rules (RLS enabled).
+  * `idempotency_keys`: Stores request hashes, processing status, and cached response payloads (RLS enabled).
+  * `outbox_events`: Stores unpublished CloudEvents, publication status (`published = false/true`), and retry counts (RLS enabled).
+  * `audit_events` (in `audit_db`): Stores immutable CloudEvent payloads, actors, event types, and timestamps (RLS enabled).
+  * `dlq_messages` (in `audit_db`): Stores dead-lettered events, error types, stack traces, retry counts, and replay status (RLS enabled).
 
 ---
 
@@ -172,29 +183,29 @@ PostgreSQL 16 managed with **Drizzle ORM** (Port `5433`):
 ```text
 .
 ├── apps/
-│   ├── host-app/               # React 18 + Vite host dashboard (Approvals Inbox, Expenses, Audit, Alerts)
-│   └── workflow-widget/        # Framework-agnostic Web Component (<workflow-widget>) in Shadow DOM
+│   ├── host-app/               # React 18 + Vite host dashboard (SSE Live Sync, Inbox, Expenses, Audit, Alerts)
+│   └── workflow-widget/        # Framework-agnostic Web Component (<workflow-widget>) with Parallel Step Cards
 ├── services/
-│   ├── workflow-api/           # Core Fastify API: State machine, Outbox Relay, Delegations & Idempotency
-│   ├── notification-service/   # Kafka consumer service with in-memory store and alerts API
-│   └── audit-service/          # Kafka consumer service persisting immutable CloudEvents to audit_db
+│   ├── workflow-api/           # Core Fastify API: State machine, Rules Engine, Outbox Relay, Delegations & RLS
+│   ├── notification-service/   # SSE live streaming hub (/api/v1/stream) and role-targeted alert consumer
+│   └── audit-service/          # Kafka consumer service persisting immutable CloudEvents & DLQ sink/replay API
 ├── packages/
-│   ├── shared-schemas/         # Zod schemas & CloudEvents 1.0 contract validators
-│   ├── shared-types/           # Shared TypeScript domain types and DTO interfaces
+│   ├── shared-schemas/         # Zod schemas, DLQ resilience headers & CloudEvents 1.0 contract validators
+│   ├── shared-types/           # Shared TypeScript domain types, Parallel Quorum policies & DTO interfaces
 │   ├── telemetry/              # OpenTelemetry OTLP tracer, Prometheus metrics & Fastify global plugin
 │   └── test-utils/             # Shared testing helpers, DB reset & Kafka mocks
 ├── k8s/                        # Kubernetes manifests & 1-click local scripts
 │   ├── 00-namespace.yaml       # Namespace workflow-platform
 │   ├── 01-configmaps-secrets.yaml # Global environment variables & OTLP exporter endpoints
 │   ├── 02-postgres.yaml        # PostgreSQL StatefulSet & PVC storage
-│   ├── 03-kafka.yaml           # Apache Kafka Broker & Zookeeper
+│   ├── 03-kafka.yaml           # Apache Kafka Broker & Zookeeper (Topics: workflow.events, retry, dlq)
 │   ├── 04-workflow-api.yaml    # Workflow API Deployment, Service & HPA
 │   ├── 05-notification-service.yaml # Notification Service Deployment & Service
 │   ├── 06-audit-service.yaml   # Audit Service Deployment & Service
 │   ├── 07-host-app.yaml        # Host React App NGINX Deployment & Service
 │   ├── 08-observability.yaml   # Jaeger Tracing, Prometheus Server & Kafka UI
 │   └── local/                  # Local cluster setup, fast hot-reloads & port-forwards
-├── tests/                      # Automated test suite (Unit, Pact Contracts, Integration, Security)
+├── tests/                      # Automated test suite (95 tests across 19 suites: Unit, Pact, Integration, RLS Security, Observability)
 ├── docker-compose.yml          # Local Docker Compose multi-container stack
 └── playwright.config.ts        # Playwright E2E browser test configuration
 ```
@@ -207,6 +218,7 @@ All comprehensive guides, runbooks, and deep-dive technical documents are organi
 
 | Document | Purpose |
 |---|---|
+| 🌟 **[Feature Catalog & Capabilities](./docs/FEATURES.md)** | Exhaustive breakdown of all platform features: SSE live sync, Kafka DLQ resilience, dynamic rules & parallel quorums, PostgreSQL RLS, state machines, and resilience patterns. |
 | 🗺️ **[System Architecture & Tracing](./docs/ARCHITECTURE.md)** | Visual sequence diagrams, multi-tier state machine flows, CloudEvents schemas, and W3C context propagation. |
 | 🚀 **[Execution & Testing Runbook](./docs/RUN_GUIDE.md)** | Step-by-step commands to run the platform, manual UI testing ($120k expense), negative test cases, and outbox chaos experiments. |
 | 🧪 **[Testing Strategy & Pyramid](./docs/TESTING_STRATEGY.md)** | Test pyramid breakdown (Vitest unit tests, Pact contract verification, Playwright E2E tests, k6 load tests). |
@@ -246,14 +258,15 @@ powershell -ExecutionPolicy Bypass -File ./k8s/local/start-port-forwards.ps1
 
 | Component / Tool | Port (Local / K8s) | Working URL | Description |
 |---|---|---|---|
-| **Host Application (React + Vite)** | `8080` / `5173` | [http://localhost:8080](http://localhost:8080) | Main UI: Expenses, Approvals Inbox, Audit Log, Notifications |
-| **Workflow API** | `3000` | [http://localhost:3000/ready](http://localhost:3000/ready) | Fastify REST API, State Machine & Outbox Relay |
-| **Notification Service** | `3001` | [http://localhost:3001/health](http://localhost:3001/health) | Kafka consumer & notifications query API |
-| **Audit Service** | `3002` | [http://localhost:3002/health](http://localhost:3002/health) | Kafka consumer & immutable audit trail REST API |
-| **Kafka Web UI** | `8085` | [http://localhost:8085](http://localhost:8085) | Real-time topic inspector & consumer group lag monitor |
-| **Jaeger Distributed Tracing** | `16686` | [http://localhost:16686](http://localhost:16686) | End-to-end distributed trace explorer (OTLP on `:4318`) |
-| **Prometheus Server** | `9090` | [http://localhost:9090](http://localhost:9090) | Prometheus metrics scraper & query interface |
-| **PostgreSQL Database** | `5433` | `localhost:5433` | Databases: `workflow_db`, `audit_db` (User: `postgres`, Pass: `postgres`) |
+| **Host Application (React + Vite)** | `8080` / `5173` | [http://localhost:8080](http://localhost:8080) | Main UI: Real-Time SSE Sync, Expenses, Parallel Approvals, Audit Log & W3C Tracing |
+| **Workflow API** | `3000` | [http://localhost:3000/ready](http://localhost:3000/ready) | Fastify REST API, State Machine, Dynamic Rules (`/api/v1/rules`) & Outbox Relay |
+| **Notification Service** | `3001` | [http://localhost:3001/health](http://localhost:3001/health) | Kafka consumer, notifications API & SSE Stream (`/api/v1/stream`) |
+| **Audit Service** | `3002` | [http://localhost:3002/health](http://localhost:3002/health) | Kafka consumer, immutable audit ledger & DLQ Replay API (`/api/v1/dlq/messages`) |
+| **Grafana Dashboards** | `3005` | [http://localhost:3005](http://localhost:3005) | Provisioned Dashboards: System Health, DB Pool & Outbox Reliability |
+| **Kafka Web UI** | `8085` | [http://localhost:8085](http://localhost:8085) | Real-time topic inspector, DLQ monitor & consumer group lag viewer |
+| **Jaeger Distributed Tracing** | `16686` | [http://localhost:16686](http://localhost:16686) | End-to-end distributed trace explorer (OTLP on `:4318`) with DB Query Spans |
+| **Prometheus Server** | `9090` | [http://localhost:9090](http://localhost:9090) | Prometheus metrics scraper, alerting rules & query interface |
+| **PostgreSQL Database** | `5433` | `localhost:5433` | Databases: `workflow_db`, `audit_db` (RLS Enforced, User: `postgres`, Pass: `postgres`) |
 
 ---
 

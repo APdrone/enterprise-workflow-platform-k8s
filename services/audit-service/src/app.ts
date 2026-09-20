@@ -14,7 +14,7 @@ export async function buildAuditApp(): Promise<FastifyInstance> {
   await app.register(cors, {
     origin: true,
     methods: ['GET', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'x-tenant-id', 'x-user-id', 'x-user-name', 'x-correlation-id', 'traceparent'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-tenant-id', 'x-user-id', 'x-user-name', 'x-user-role', 'x-correlation-id', 'traceparent'],
     exposedHeaders: ['x-correlation-id', 'traceparent'],
   });
 

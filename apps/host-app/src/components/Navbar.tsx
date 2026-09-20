@@ -1,10 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { NavLink } from 'react-router-dom';
 import { useAuth, PRESET_TENANTS, PRESET_USERS } from '../context/AuthContext.js';
-import { Layers, CheckSquare, Shield, Bell, Building2, UserCircle2 } from 'lucide-react';
+import { useSSE } from '../context/SSEContext.js';
+import { Layers, CheckSquare, Shield, Bell, Building2, UserCircle2, Radio } from 'lucide-react';
 
 export const Navbar: React.FC = () => {
   const { tenantId, setTenantId, currentUser, setCurrentUser, apiUrl } = useAuth();
+  const { connected: sseConnected, unreadCount } = useSSE();
   const [apiOnline, setApiOnline] = useState<boolean>(true);
 
   useEffect(() => {
@@ -112,6 +114,24 @@ export const Navbar: React.FC = () => {
                   />
                   {apiOnline ? 'API LIVE' : 'OFFLINE'}
                 </span>
+                <span
+                  title={sseConnected ? 'Server-Sent Events Live Stream Connected' : 'Reconnecting to SSE Stream...'}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    fontSize: '10px',
+                    fontWeight: 700,
+                    padding: '2px 7px',
+                    borderRadius: '9999px',
+                    backgroundColor: sseConnected ? 'rgba(59, 130, 246, 0.15)' : 'rgba(245, 158, 11, 0.15)',
+                    color: sseConnected ? '#60a5fa' : '#fbbf24',
+                    border: `1px solid ${sseConnected ? 'rgba(59, 130, 246, 0.3)' : 'rgba(245, 158, 11, 0.3)'}`,
+                  }}
+                >
+                  <Radio size={9} className={sseConnected ? 'animate-pulse' : ''} />
+                  {sseConnected ? 'SSE LIVE' : 'CONNECTING'}
+                </span>
               </div>
               <div style={{ fontSize: '11px', color: '#94a3b8' }}>Event-Driven Microservices Platform</div>
             </div>
@@ -196,11 +216,28 @@ export const Navbar: React.FC = () => {
                 color: isActive ? '#ffffff' : '#94a3b8',
                 backgroundColor: isActive ? '#1e293b' : 'transparent',
                 border: isActive ? '1px solid #334155' : '1px solid transparent',
+                position: 'relative',
                 transition: 'all 0.15s ease',
               })}
             >
               <Bell size={15} />
               Notifications
+              {unreadCount > 0 && (
+                <span
+                  style={{
+                    backgroundColor: '#ef4444',
+                    color: '#ffffff',
+                    fontSize: '10px',
+                    fontWeight: 800,
+                    padding: '1px 6px',
+                    borderRadius: '9999px',
+                    marginLeft: '4px',
+                    boxShadow: '0 0 10px rgba(239, 68, 68, 0.5)',
+                  }}
+                >
+                  {unreadCount > 99 ? '99+' : unreadCount}
+                </span>
+              )}
             </NavLink>
           </nav>
         </div>

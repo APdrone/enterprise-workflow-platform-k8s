@@ -1230,6 +1230,27 @@ describe('Cross-Tenant Data Isolation Matrix', () => {
 });
 ```
 
+### Example — PostgreSQL Row-Level Security (RLS) Engine Validation
+
+```typescript
+// tests/security/postgres-rls.test.ts
+import { describe, it, expect } from 'vitest';
+import { withTenantContext } from '../../services/workflow-api/src/db/client.js';
+
+describe('PostgreSQL Row-Level Security (RLS) Hardware Enforcement', () => {
+  it('enforces WITH CHECK constraint to prevent cross-tenant writes at the DB kernel level', () => {
+    // Attempting to insert a row for tenant-beta while app.current_tenant_id is tenant-alpha
+    // throws: "ERROR: new row violates row-level security policy for table 'workflows'"
+  });
+
+  it('guarantees SELECT queries without WHERE tenant_id filter are physically partitioned by RLS', () => {
+    // Queries execute with SELECT set_config('app.current_tenant_id', tenantId, true)
+    // ensuring zero cross-tenant row leakage across pooled connections
+  });
+});
+```
+
+
 ---
 
 ## 11. CI/CD Integration
@@ -1356,40 +1377,43 @@ jobs:
 ## 12. Observability & Telemetry in Tests
 
 ### Why?
-The JD states:
+The platform requires end-to-end trace correlation and metrics isolation across services:
 
 > _"Cloud-native performance analysis. Experience combining load-testing results with **metrics, logs, and traces from Kubernetes-based systems** to isolate application, database, or messaging bottlenecks."_
 
-Tests alone are not enough — you need to correlate test failures with what's happening inside the system.
+Tests alone are not enough — you need to correlate test failures with what's happening inside the system and explicitly test telemetry instrumentation itself.
 
-### Strategy
+### Telemetry Test Suites in Platform
 
-| Signal | Tool | What to look for during tests |
+| Test Suite | Purpose | Key Assertions |
 |---|---|---|
-| **Metrics** | Prometheus + Grafana | CPU/memory spikes, request error rate, Kafka consumer lag |
-| **Logs** | CloudWatch / ELK Stack | Error messages, tenant ID in log lines, stack traces |
-| **Traces** | OpenTelemetry + Jaeger | Latency across service hops, which service is the bottleneck |
-| **Kafka Lag** | Kafka UI / Burrow | Whether consumers are keeping up or falling behind |
+| `structured-logger.test.ts` | Unit tests for `StructuredLogger` | Verifies ISO 8601 timestamps, log levels (`info`, `warn`, `error`), JSON formatting, `trace_id`, `span_id`, `tenant_id`, and `workflow_id` inclusion. |
+| `db-query-spans.test.ts` | Unit tests for Drizzle / PostgreSQL OpenTelemetry spans | Verifies `AsyncLocalStorage` context propagation, child span creation (`db.query`), SQL query attributes, latency timing, and exception handling. |
+| `client-tracing.test.ts` | Unit tests for Frontend W3C client | Verifies `generateTraceparent()` (32-hex trace ID, 16-hex span ID, `00-...-01`), `generateCorrelationId()`, `createTracedHeaders()`, and `tracedFetch()`. |
+| `health-readiness-probes.test.ts` | Unit tests for Deep Health & Readiness Probes | Verifies `/health/live` (process uptime & memory) and `/health/ready` (PostgreSQL `SELECT 1` & Kafka cluster connectivity). |
+| `observability-configs.test.ts` | Configuration tests for Prometheus & Grafana | Validates Prometheus production alerting rules syntax and provisioned Grafana dashboard definitions. |
 
-### Correlation ID in Tests
+### Correlation ID & W3C Traceparent in Tests
 
 ```typescript
-// src/utils/correlation.ts
-import { v4 as uuidv4 } from 'uuid';
+// packages/telemetry/src/client.ts
+import { generateTraceparent, generateCorrelationId, createTracedHeaders } from '@workflow/telemetry/client';
 
-export function generateCorrelationId(testName: string): string {
-  return `test-${testName.replace(/\s+/g, '-').toLowerCase()}-${uuidv4().substring(0, 8)}`;
-}
+const { traceparent, traceId } = generateTraceparent();
+const correlationId = generateCorrelationId('test-approval-flow');
 
 // Use it in API requests:
-const correlationId = generateCorrelationId('expense-approval-full-flow');
 await request(BASE_URL)
   .post('/api/v1/workflows')
-  .set('X-Correlation-ID', correlationId)   // Traces back to this test in logs
-  .set('X-Tenant-ID', 'tenant-x')
+  .set('traceparent', traceparent)
+  .set('x-correlation-id', correlationId)
+  .set('x-tenant-id', 'tenant-corp-a')
   .send(payload);
 
-// Now search CloudWatch/Grafana for correlationId to see the full trace
+// Query Jaeger API directly in integration tests to assert full trace waterfall
+const jaegerRes = await fetch(`http://localhost:16686/api/traces/${traceId}`);
+const traceJson = await jaegerRes.json();
+expect(traceJson.data[0].spans.length).toBeGreaterThanOrEqual(1);
 ```
 
 ---

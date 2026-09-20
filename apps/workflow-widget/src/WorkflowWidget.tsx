@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Workflow, WorkflowStatus, WorkflowStep } from '@workflow/shared-types';
+import { createTracedHeaders } from '@workflow/telemetry/client';
 import { 
   CheckCircle, 
   XCircle, 
@@ -8,11 +9,11 @@ import {
   Ban, 
   AlertTriangle, 
   RefreshCw, 
-  Sparkles,
-  UserCheck,
-  ShieldAlert,
-  ArrowRight,
-  Check
+  Sparkles, 
+  UserCheck, 
+  ShieldAlert, 
+  ArrowRight, 
+  Users 
 } from 'lucide-react';
 
 export interface WorkflowWidgetProps {
@@ -48,15 +49,29 @@ const DEFAULT_MOCK_WORKFLOW: Workflow = {
       stepOrder: 1,
       stepRole: 'TEAM_LEAD',
       status: 'PENDING',
+      policy: 'ALL_MUST_APPROVE',
       createdAt: new Date().toISOString(),
     },
     {
-      id: 'step-2',
+      id: 'step-2a',
       workflowId: 'wf-demo-8942',
       tenantId: 'tenant-corp-a',
       stepOrder: 2,
       stepRole: 'DEPT_MANAGER',
       status: 'PENDING',
+      policy: 'ALL_MUST_APPROVE',
+      parallelGroup: 'mgmt-review',
+      createdAt: new Date().toISOString(),
+    },
+    {
+      id: 'step-2b',
+      workflowId: 'wf-demo-8942',
+      tenantId: 'tenant-corp-a',
+      stepOrder: 2,
+      stepRole: 'FINANCE_DIRECTOR',
+      status: 'PENDING',
+      policy: 'ALL_MUST_APPROVE',
+      parallelGroup: 'mgmt-review',
       createdAt: new Date().toISOString(),
     },
   ],
@@ -96,11 +111,11 @@ export const WorkflowWidget: React.FC<WorkflowWidgetProps> = ({
 
     try {
       const res = await fetch(`${apiUrl}/api/v1/workflows/${workflowId}`, {
-        headers: {
+        headers: createTracedHeaders({
           'x-tenant-id': tenantId,
           'x-user-id': userId,
-          'x-user-name': userName,
-        },
+          'x-user-name': userName || '',
+        }, { tenantId }),
       });
 
       if (!res.ok) {
@@ -126,10 +141,66 @@ export const WorkflowWidget: React.FC<WorkflowWidgetProps> = ({
     if (!initialMockWorkflow) {
       setLoading(true);
       fetchWorkflow();
-      const interval = setInterval(fetchWorkflow, 4000);
-      return () => clearInterval(interval);
+      
+      const handleLiveUpdate = (e: Event) => {
+        const customEvt = e as CustomEvent;
+        if (!customEvt.detail?.workflowId || customEvt.detail?.workflowId === workflowId) {
+          fetchWorkflow();
+        }
+      };
+
+      if (typeof window !== 'undefined') {
+        window.addEventListener('workflow:state_changed', handleLiveUpdate);
+      }
+
+      const interval = setInterval(fetchWorkflow, 30000);
+      return () => {
+        clearInterval(interval);
+        if (typeof window !== 'undefined') {
+          window.removeEventListener('workflow:state_changed', handleLiveUpdate);
+        }
+      };
     }
-  }, [fetchWorkflow, initialMockWorkflow]);
+  }, [fetchWorkflow, initialMockWorkflow, workflowId]);
+
+  const formatStepRoleName = (role?: string) => {
+    switch (role) {
+      case 'TEAM_LEAD': return 'Team Lead';
+      case 'DEPT_MANAGER': return 'Dept Manager';
+      case 'FINANCE_DIRECTOR': return 'Finance Director';
+      case 'SECURITY_OFFICER': return 'Security Officer';
+      case 'LEGAL_COUNSEL': return 'Legal Counsel';
+      case 'GENERAL_APPROVER': return 'Manager';
+      default: return role || 'Approver';
+    }
+  };
+
+  // Check authorization for a specific step
+  const checkUserCanApproveStep = useCallback((step: WorkflowStep) => {
+    if (workflow?.status !== 'PENDING') return false;
+    if (userRole === 'admin') return true;
+    if (step.approverId && (step.approverId === userId || step.approverId === userName)) return true;
+
+    const role = step.stepRole;
+    if (role === 'TEAM_LEAD' && (userRole === 'team_lead' || userRole === 'approver')) return true;
+    if (role === 'DEPT_MANAGER' && (userRole === 'dept_manager' || userRole === 'approver')) return true;
+    if (role === 'FINANCE_DIRECTOR' && (userRole === 'finance_director' || userRole === 'approver')) return true;
+    if (role === 'SECURITY_OFFICER' && (userRole === 'security_officer' || userRole === 'approver')) return true;
+    if (role === 'LEGAL_COUNSEL' && (userRole === 'legal_counsel' || userRole === 'approver')) return true;
+    if (role === 'GENERAL_APPROVER' && (userRole === 'approver' || userRole === 'dept_manager' || userRole === 'team_lead')) return true;
+    return false;
+  }, [workflow?.status, userRole, userId, userName]);
+
+  // Current pending steps at active step order
+  const currentStepOrder = workflow?.currentStepOrder || 1;
+  const currentPendingSteps = workflow?.steps?.filter(
+    (s) => s.stepOrder === currentStepOrder && s.status === 'PENDING'
+  ) || [];
+
+  const approvableSteps = currentPendingSteps.filter(checkUserCanApproveStep);
+  const primaryApprovableStep = approvableSteps[0];
+  const canApproveCurrentStep = approvableSteps.length > 0;
+  const isRequester = userRole === 'requester' || userRole === 'admin' || userId === workflow?.requesterId;
 
   const executeAction = async (action: 'submit' | 'approve' | 'reject' | 'cancel', payload: any = {}) => {
     setActionLoading(true);
@@ -139,37 +210,38 @@ export const WorkflowWidget: React.FC<WorkflowWidgetProps> = ({
     if (isMockMode && workflow) {
       setTimeout(() => {
         let newStatus: WorkflowStatus = workflow.status;
-        let currentStepOrder = workflow.currentStepOrder || 1;
+        let nextStepOrder = workflow.currentStepOrder || 1;
         const totalSteps = workflow.totalSteps || 1;
         const steps = workflow.steps ? [...workflow.steps] : [];
 
         if (action === 'submit') {
           newStatus = 'PENDING';
         } else if (action === 'approve') {
-          if (steps.length >= currentStepOrder) {
-            steps[currentStepOrder - 1] = {
-              ...steps[currentStepOrder - 1],
-              status: 'APPROVED',
-              actedBy: userName,
-              actedAt: new Date().toISOString(),
-            };
+          const stepToApprove = primaryApprovableStep || steps.find((s) => s.stepOrder === nextStepOrder && s.status === 'PENDING');
+          if (stepToApprove) {
+            const idx = steps.findIndex((s) => s.id === stepToApprove.id);
+            if (idx >= 0) {
+              steps[idx] = {
+                ...steps[idx],
+                status: 'APPROVED',
+                actedBy: userName,
+                actedAt: new Date().toISOString(),
+              };
+            }
           }
-          if (currentStepOrder < totalSteps) {
-            currentStepOrder += 1;
-            newStatus = 'PENDING';
-          } else {
-            newStatus = 'APPROVED';
+
+          // Check remaining pending steps at this order
+          const remaining = steps.filter((s) => s.stepOrder === nextStepOrder && s.status === 'PENDING');
+          if (remaining.length === 0) {
+            if (nextStepOrder < totalSteps) {
+              nextStepOrder += 1;
+              newStatus = 'PENDING';
+            } else {
+              newStatus = 'APPROVED';
+            }
           }
         } else if (action === 'reject') {
           newStatus = 'REJECTED';
-          if (steps.length >= currentStepOrder) {
-            steps[currentStepOrder - 1] = {
-              ...steps[currentStepOrder - 1],
-              status: 'REJECTED',
-              actedBy: userName,
-              actedAt: new Date().toISOString(),
-            };
-          }
         } else if (action === 'cancel') {
           newStatus = 'CANCELLED';
         }
@@ -177,7 +249,7 @@ export const WorkflowWidget: React.FC<WorkflowWidgetProps> = ({
         const updated: Workflow = {
           ...workflow,
           status: newStatus,
-          currentStepOrder,
+          currentStepOrder: nextStepOrder,
           steps,
           rejectionReason: payload.reason,
           updatedAt: new Date().toISOString(),
@@ -199,13 +271,16 @@ export const WorkflowWidget: React.FC<WorkflowWidgetProps> = ({
     try {
       const res = await fetch(`${apiUrl}/api/v1/workflows/${workflowId}/${action}`, {
         method: 'POST',
-        headers: {
+        headers: createTracedHeaders({
           'Content-Type': 'application/json',
           'x-tenant-id': tenantId,
           'x-user-id': userId,
-          'x-user-name': userName,
-        },
-        body: JSON.stringify(payload),
+          'x-user-name': userName || '',
+        }, { tenantId }),
+        body: JSON.stringify({
+          ...payload,
+          stepId: primaryApprovableStep?.id,
+        }),
       });
 
       const json = await res.json();
@@ -237,22 +312,9 @@ export const WorkflowWidget: React.FC<WorkflowWidgetProps> = ({
     setLoading(false);
   };
 
-  const formatStepRoleName = (role?: string) => {
-    switch (role) {
-      case 'TEAM_LEAD': return 'Team Lead';
-      case 'DEPT_MANAGER': return 'Dept Manager';
-      case 'FINANCE_DIRECTOR': return 'Finance Director';
-      case 'GENERAL_APPROVER': return 'Manager';
-      default: return role || 'Approver';
-    }
-  };
-
   const getStatusBadge = (wf: Workflow) => {
     if (wf.status === 'PENDING') {
-      const currentStep = wf.steps?.find((s) => s.stepOrder === (wf.currentStepOrder || 1));
-      const roleName = formatStepRoleName(currentStep?.stepRole);
       const isMultiStep = (wf.totalSteps || 1) > 1;
-
       return (
         <span
           data-testid="workflow-status-badge"
@@ -281,7 +343,7 @@ export const WorkflowWidget: React.FC<WorkflowWidgetProps> = ({
               animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite',
             }}
           />
-          {isMultiStep ? `Pending: Step ${wf.currentStepOrder || 1} (${roleName})` : 'Pending Review'}
+          {isMultiStep ? `Pending: Step ${wf.currentStepOrder || 1}` : 'Pending Review'}
         </span>
       );
     }
@@ -328,7 +390,16 @@ export const WorkflowWidget: React.FC<WorkflowWidgetProps> = ({
     );
   };
 
-  // Loading State
+  // Group steps by stepOrder for parallel visualization
+  const groupedSteps = (workflow?.steps || []).reduce<Record<number, WorkflowStep[]>>((acc, step) => {
+    const order = step.stepOrder || 1;
+    if (!acc[order]) acc[order] = [];
+    acc[order].push(step);
+    return acc;
+  }, {});
+
+  const stepOrderKeys = Object.keys(groupedSteps).map(Number).sort((a, b) => a - b);
+
   if (loading && !workflow) {
     return (
       <div
@@ -351,7 +422,6 @@ export const WorkflowWidget: React.FC<WorkflowWidgetProps> = ({
     );
   }
 
-  // Error State with fallback
   if (errorMsg && !workflow) {
     return (
       <div
@@ -441,34 +511,6 @@ export const WorkflowWidget: React.FC<WorkflowWidgetProps> = ({
 
   if (!workflow) return null;
 
-  // Determine current step requirements and actor authorization
-  const currentStepOrder = workflow.currentStepOrder || 1;
-  const currentStep = workflow.steps?.find((s) => s.stepOrder === currentStepOrder);
-  const currentRoleRequired = currentStep?.stepRole || (currentStepOrder === 1 ? 'TEAM_LEAD' : currentStepOrder === 2 ? 'DEPT_MANAGER' : 'FINANCE_DIRECTOR');
-
-  const checkUserCanApprove = () => {
-    if (workflow.status !== 'PENDING') return false;
-    if (userRole === 'admin') return true;
-
-    // Strict role check per approval level:
-    // Step 1 -> team_lead (Bob Smith)
-    // Step 2 -> dept_manager (Carol White)
-    // Step 3 -> finance_director (Diana Prince)
-    if (currentRoleRequired === 'TEAM_LEAD') {
-      return userRole === 'team_lead' || userRole === 'approver';
-    }
-    if (currentRoleRequired === 'DEPT_MANAGER') {
-      return userRole === 'dept_manager';
-    }
-    if (currentRoleRequired === 'FINANCE_DIRECTOR') {
-      return userRole === 'finance_director';
-    }
-    return false;
-  };
-
-  const canApproveCurrentStep = checkUserCanApprove();
-  const isRequester = userRole === 'requester' || userRole === 'admin' || userId === workflow.requesterId;
-
   return (
     <div
       data-testid="workflow-widget-container"
@@ -545,8 +587,8 @@ export const WorkflowWidget: React.FC<WorkflowWidgetProps> = ({
         </div>
       </div>
 
-      {/* Multi-Step Timeline / Stepper */}
-      {workflow.steps && workflow.steps.length > 0 && (
+      {/* Multi-Step & Parallel Timeline Stepper */}
+      {stepOrderKeys.length > 0 && (
         <div
           data-testid="workflow-stepper-container"
           style={{
@@ -559,104 +601,117 @@ export const WorkflowWidget: React.FC<WorkflowWidgetProps> = ({
         >
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
             <span style={{ fontSize: '12px', fontWeight: 700, color: '#334155', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-              Approval Chain ({workflow.steps.length} Steps Required)
+              Approval Hierarchy ({stepOrderKeys.length} Level{stepOrderKeys.length > 1 ? 's' : ''})
             </span>
             <span style={{ fontSize: '12px', color: '#64748b' }}>
-              Current: <strong>Step {workflow.currentStepOrder || 1} of {workflow.totalSteps || workflow.steps.length}</strong>
+              Current: <strong>Step {workflow.currentStepOrder || 1} of {workflow.totalSteps || stepOrderKeys.length}</strong>
             </span>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', overflowX: 'auto', padding: '4px 0' }}>
-            {workflow.steps.map((step, idx) => {
-              const isPast = step.status === 'APPROVED';
-              const isCurrent = workflow.status === 'PENDING' && step.stepOrder === (workflow.currentStepOrder || 1);
-              const isRejected = step.status === 'REJECTED';
-              const stepStatusLabel = isPast
-                ? 'APPROVED'
-                : isCurrent
-                ? 'PENDING'
-                : isRejected
-                ? 'REJECTED'
-                : workflow.status === 'DRAFT'
-                ? 'PENDING'
-                : 'WAITING';
+          <div style={{ display: 'flex', alignItems: 'stretch', gap: '8px', overflowX: 'auto', padding: '4px 0' }}>
+            {stepOrderKeys.map((order, orderIdx) => {
+              const stepsAtOrder = groupedSteps[order];
+              const isParallel = stepsAtOrder.length > 1;
+              const allApproved = stepsAtOrder.every((s) => s.status === 'APPROVED');
+              const anyApproved = stepsAtOrder.some((s) => s.status === 'APPROVED');
+              const anyRejected = stepsAtOrder.some((s) => s.status === 'REJECTED');
+              const isCurrent = workflow.status === 'PENDING' && order === (workflow.currentStepOrder || 1);
 
               let borderColor = '#cbd5e1';
               let bgColor = '#ffffff';
-              let textColor = '#64748b';
-              let badgeBg = '#f1f5f9';
-              let badgeColor = '#475569';
 
-              if (isPast) {
+              if (allApproved || (stepsAtOrder[0]?.policy === 'ANY_CAN_APPROVE' && anyApproved)) {
                 borderColor = '#86efac';
                 bgColor = '#f0fdf4';
-                textColor = '#16a34a';
-                badgeBg = '#dcfce7';
-                badgeColor = '#15803d';
               } else if (isCurrent) {
                 borderColor = '#f59e0b';
                 bgColor = '#fffbeb';
-                textColor = '#b45309';
-                badgeBg = '#fef3c7';
-                badgeColor = '#b45309';
-              } else if (isRejected) {
+              } else if (anyRejected) {
                 borderColor = '#fca5a5';
                 bgColor = '#fef2f2';
-                textColor = '#dc2626';
-                badgeBg = '#fee2e2';
-                badgeColor = '#b91c1c';
               }
 
               return (
-                <React.Fragment key={step.id || idx}>
+                <React.Fragment key={`order-${order}`}>
                   <div
-                    data-testid={`step-node-${step.stepOrder}`}
+                    data-testid={`step-node-${order}`}
                     style={{
                       flex: 1,
-                      minWidth: '150px',
+                      minWidth: isParallel ? '220px' : '150px',
                       padding: '12px 14px',
                       borderRadius: '8px',
                       border: `1.5px solid ${borderColor}`,
                       backgroundColor: bgColor,
                       display: 'flex',
                       flexDirection: 'column',
-                      gap: '4px',
+                      gap: '6px',
                     }}
                   >
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '2px' }}>
-                      <span style={{ fontSize: '11px', fontWeight: 700, color: textColor }}>
-                        Step {step.stepOrder}
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <span style={{ fontSize: '11px', fontWeight: 700, color: isCurrent ? '#b45309' : allApproved ? '#16a34a' : '#64748b' }}>
+                        Step {order}
                       </span>
-                      <span
-                        style={{
-                          fontSize: '10px',
-                          fontWeight: 700,
-                          padding: '1px 6px',
-                          borderRadius: '4px',
-                          backgroundColor: badgeBg,
-                          color: badgeColor,
-                          letterSpacing: '0.04em',
-                        }}
-                      >
-                        {stepStatusLabel}
-                      </span>
+                      {isParallel && (
+                        <span
+                          style={{
+                            fontSize: '9px',
+                            fontWeight: 700,
+                            padding: '2px 6px',
+                            borderRadius: '4px',
+                            backgroundColor: '#e0e7ff',
+                            color: '#3730a3',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '3px',
+                          }}
+                        >
+                          <Users size={10} />
+                          {stepsAtOrder[0]?.policy === 'ANY_CAN_APPROVE' ? 'PARALLEL (OR)' : 'PARALLEL (AND)'}
+                        </span>
+                      )}
                     </div>
-                    <div style={{ fontSize: '13px', fontWeight: 700, color: '#1e293b' }}>
-                      {formatStepRoleName(step.stepRole)}
-                    </div>
-                    <div style={{ fontSize: '11px', color: '#64748b', marginTop: '2px' }}>
-                      {isPast
-                        ? `Approved by ${step.actedBy || 'Approver'}`
-                        : isCurrent
-                        ? 'Pending Decision'
-                        : workflow.status === 'DRAFT'
-                        ? 'Queued on Submit'
-                        : 'Awaiting Prior Step'}
+
+                    {/* Step Reviewer Items */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      {stepsAtOrder.map((step) => {
+                        const isStepApproved = step.status === 'APPROVED';
+                        const isStepPending = step.status === 'PENDING';
+                        const isStepSkipped = step.status === 'SKIPPED';
+                        const isStepRejected = step.status === 'REJECTED';
+
+                        return (
+                          <div
+                            key={step.id}
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'space-between',
+                              padding: '4px 8px',
+                              borderRadius: '6px',
+                              backgroundColor: isStepApproved ? '#dcfce7' : isStepPending && isCurrent ? '#fef3c7' : '#f1f5f9',
+                              fontSize: '12px',
+                            }}
+                          >
+                            <span style={{ fontWeight: 600, color: '#1e293b' }}>
+                              {formatStepRoleName(step.stepRole)}
+                            </span>
+                            <span
+                              style={{
+                                fontSize: '10px',
+                                fontWeight: 700,
+                                color: isStepApproved ? '#15803d' : isStepPending ? '#b45309' : isStepSkipped ? '#64748b' : '#b91c1c',
+                              }}
+                            >
+                              {isStepApproved ? '✓ APPROVED' : isStepPending ? (isCurrent ? 'PENDING' : 'WAITING') : isStepSkipped ? 'SKIPPED' : 'REJECTED'}
+                            </span>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
 
-                  {idx < workflow.steps!.length - 1 && (
-                    <ArrowRight size={16} color="#94a3b8" style={{ flexShrink: 0 }} />
+                  {orderIdx < stepOrderKeys.length - 1 && (
+                    <ArrowRight size={16} color="#94a3b8" style={{ flexShrink: 0, alignSelf: 'center' }} />
                   )}
                 </React.Fragment>
               );
@@ -736,8 +791,8 @@ export const WorkflowWidget: React.FC<WorkflowWidgetProps> = ({
         >
           <ShieldAlert size={18} style={{ flexShrink: 0 }} />
           <div>
-            <strong>Step {currentStepOrder} Approval Required:</strong> This step requires approval from{' '}
-            <strong>{formatStepRoleName(currentRoleRequired)}</strong>. You are currently logged in as{' '}
+            <strong>Step {currentStepOrder} Approval Required:</strong> Pending decision from{' '}
+            <strong>{currentPendingSteps.map((s) => formatStepRoleName(s.stepRole)).join(' & ')}</strong>. You are currently logged in as{' '}
             <strong>{userName}</strong> ({userRole}). Switch active persona in the header bar to review.
           </div>
         </div>
@@ -808,7 +863,7 @@ export const WorkflowWidget: React.FC<WorkflowWidgetProps> = ({
           </button>
         )}
 
-        {/* PENDING -> APPROVE / REJECT (Only when persona matches current step!) */}
+        {/* PENDING -> APPROVE / REJECT */}
         {workflow.status === 'PENDING' && canApproveCurrentStep && (
           <>
             <button
@@ -857,9 +912,9 @@ export const WorkflowWidget: React.FC<WorkflowWidgetProps> = ({
               <CheckCircle size={14} />
               {actionLoading
                 ? 'Processing...'
-                : (workflow.totalSteps || 1) > 1 && currentStepOrder < (workflow.totalSteps || 1)
-                ? `Approve Step ${currentStepOrder} (${formatStepRoleName(currentRoleRequired)})`
-                : 'Approve Request (Final)'}
+                : primaryApprovableStep
+                ? `Approve as ${formatStepRoleName(primaryApprovableStep.stepRole)}`
+                : 'Approve Request'}
             </button>
           </>
         )}

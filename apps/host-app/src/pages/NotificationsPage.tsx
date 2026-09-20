@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext.js';
+import { useSSE } from '../context/SSEContext.js';
 import { NotificationRecord } from '@workflow/shared-types';
+import { buildAuthHeaders, tracedFetch } from '../utils/api.js';
 import {
   Bell,
   RefreshCw,
@@ -16,6 +18,7 @@ import {
 
 export const NotificationsPage: React.FC = () => {
   const { tenantId, currentUser, notificationApiUrl } = useAuth();
+  const { refreshSignal } = useSSE();
   const [notifications, setNotifications] = useState<NotificationRecord[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [filterMode, setFilterMode] = useState<'all' | 'mine'>('all');
@@ -23,7 +26,9 @@ export const NotificationsPage: React.FC = () => {
   const fetchNotifications = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${notificationApiUrl}/api/v1/notifications?tenantId=${tenantId}`);
+      const res = await tracedFetch(`${notificationApiUrl}/api/v1/notifications?tenantId=${tenantId}`, {
+        headers: buildAuthHeaders(tenantId, currentUser),
+      });
       const json = await res.json();
       if (json.success && json.data) {
         setNotifications(json.data);
@@ -33,13 +38,11 @@ export const NotificationsPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [notificationApiUrl, tenantId]);
+  }, [notificationApiUrl, tenantId, currentUser]);
 
   useEffect(() => {
     fetchNotifications();
-    const interval = setInterval(fetchNotifications, 4000);
-    return () => clearInterval(interval);
-  }, [fetchNotifications]);
+  }, [fetchNotifications, refreshSignal]);
 
   const isRelevantToMe = (n: NotificationRecord) => {
     if (n.recipientId === currentUser.id) return true;

@@ -55,6 +55,7 @@ spec:
   selector:
     app: jaeger
 ---
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -64,6 +65,9 @@ data:
   prometheus.yml: |
     global:
       scrape_interval: 10s
+      evaluation_interval: 10s
+    rule_files:
+      - /etc/prometheus/alert_rules.yml
     scrape_configs:
       - job_name: 'workflow-api'
         static_configs:
@@ -74,6 +78,37 @@ data:
       - job_name: 'audit-service'
         static_configs:
           - targets: ['audit-service:3002']
+  alert_rules.yml: |
+    groups:
+      - name: workflow_platform_alerts
+        rules:
+          - alert: HighHttpErrorRate
+            expr: sum(rate(http_requests_total{status_code=~"5.."}[5m])) by (service) / sum(rate(http_requests_total[5m])) by (service) > 0.01
+            for: 2m
+            labels:
+              severity: critical
+            annotations:
+              summary: "High HTTP 5xx error rate on {{ $labels.service }}"
+          - alert: OutboxBacklogHigh
+            expr: outbox_unpublished_events_total > 50
+            for: 2m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Transactional Outbox backlog growing"
+          - alert: DeadLetterQueueSurge
+            expr: sum(increase(dlq_messages_total[5m])) by (service, error_type) > 0
+            labels:
+              severity: warning
+            annotations:
+              summary: "Dead Letter Queue activity detected on {{ $labels.service }}"
+          - alert: ServiceDown
+            expr: up == 0
+            for: 1m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Service instance {{ $labels.instance }} is down"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -128,3 +163,109 @@ spec:
       name: web
   selector:
     app: prometheus
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: workflow-platform
+data:
+  prometheus.yml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus:9090
+        isDefault: true
+        editable: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards-provider
+  namespace: workflow-platform
+data:
+  dashboards.yml: |
+    apiVersion: 1
+    providers:
+      - name: 'Workflow Platform'
+        orgId: 1
+        folder: 'Workflow Platform'
+        type: file
+        disableDeletion: false
+        editable: true
+        options:
+          path: /var/lib/grafana/dashboards
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: workflow-platform
+  labels:
+    app: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      containers:
+        - name: grafana
+          image: grafana/grafana:10.3.3
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: GF_SECURITY_ADMIN_USER
+              value: "admin"
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              value: "admin"
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "true"
+            - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+              value: "Admin"
+            - name: GF_AUTH_DISABLE_LOGIN_FORM
+              value: "false"
+          volumeMounts:
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+            - name: dashboards-provider
+              mountPath: /etc/grafana/provisioning/dashboards
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+      volumes:
+        - name: datasources
+          configMap:
+            name: grafana-datasources
+        - name: dashboards-provider
+          configMap:
+            name: grafana-dashboards-provider
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: workflow-platform
+  labels:
+    app: grafana
+spec:
+  ports:
+    - port: 3005
+      targetPort: 3000
+      name: http
+  selector:
+    app: grafana
+
+

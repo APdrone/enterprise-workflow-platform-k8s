@@ -5,6 +5,7 @@ import { tenantMiddleware } from './middleware/tenant.middleware.js';
 import { idempotencyMiddleware } from './middleware/idempotency.middleware.js';
 import { workflowRoutes } from './routes/workflow.routes.js';
 import { adminRoutes } from './routes/admin.routes.js';
+import { rulesRoutes } from './routes/rules.routes.js';
 import { telemetryPlugin } from '@workflow/telemetry';
 
 export async function buildApp(): Promise<FastifyInstance> {
@@ -25,6 +26,7 @@ export async function buildApp(): Promise<FastifyInstance> {
       'x-tenant-id',
       'x-user-id',
       'x-user-name',
+      'x-user-role',
       'x-correlation-id',
       'x-request-id',
       'x-admin-token',
@@ -40,8 +42,9 @@ export async function buildApp(): Promise<FastifyInstance> {
   // Idempotency pre-handler for POST/PUT/PATCH/DELETE
   app.addHook('preHandler', idempotencyMiddleware);
 
-  // Register workflow and admin routes
+  // Register workflow, rules, and admin routes
   await app.register(workflowRoutes);
+  await app.register(rulesRoutes);
   await app.register(adminRoutes);
 
   return app;

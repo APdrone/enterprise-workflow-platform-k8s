@@ -1,11 +1,14 @@
 import { FastifyInstance, FastifyPluginAsync } from 'fastify';
 import fp from 'fastify-plugin';
-import { getTracer, Span } from './tracer.js';
+import { getTracer, Span, traceStorage } from './tracer.js';
 import { getMetrics } from './metrics.js';
+import { getLogger, StructuredLogger, LogContext } from './logger.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
     span?: Span;
+    structuredLog?: StructuredLogger;
+    logContext?: LogContext;
   }
 }
 
@@ -20,6 +23,8 @@ const telemetryPluginRaw: FastifyPluginAsync<TelemetryPluginOptions> = async (
   const serviceName = opts.serviceName || 'workflow-service';
   const tracer = getTracer(serviceName);
   const metrics = getMetrics(serviceName);
+  const rootLogger = getLogger(serviceName);
+
 
   // Expose Prometheus metrics endpoint
   fastify.get('/metrics', async (_, reply) => {
@@ -52,6 +57,25 @@ const telemetryPluginRaw: FastifyPluginAsync<TelemetryPluginOptions> = async (
 
     request.span = span;
 
+    // Propagate into AsyncLocalStorage for child database spans
+    traceStorage.enterWith({
+      span,
+      traceparent: span.toTraceparent(),
+      tenantId: request.headers['x-tenant-id'] as string,
+    });
+
+    // Create contextual structured logger
+    const logContext: LogContext = {
+      traceId: span.context.traceId,
+      spanId: span.context.spanId,
+      tenantId: request.headers['x-tenant-id'] as string,
+      correlationId: (request.headers['x-correlation-id'] || request.headers['x-request-id']) as string,
+      method: request.method,
+      url: request.url,
+    };
+    request.logContext = logContext;
+    request.structuredLog = rootLogger.child(logContext);
+
     // Inject traceparent into response headers
     reply.header('traceparent', span.toTraceparent());
   });
@@ -78,9 +102,12 @@ const telemetryPluginRaw: FastifyPluginAsync<TelemetryPluginOptions> = async (
     }
   });
 
-  fastify.addHook('onError', async (request, _, error) => {
+  fastify.addHook('onError', async (request, reply, error) => {
     if (request.span) {
       request.span.recordException(error);
+    }
+    if (request.structuredLog) {
+      request.structuredLog.error(`HTTP request error: ${error.message}`, { statusCode: reply.statusCode }, error);
     }
   });
 };
@@ -88,4 +115,5 @@ const telemetryPluginRaw: FastifyPluginAsync<TelemetryPluginOptions> = async (
 export const telemetryPlugin = fp(telemetryPluginRaw, {
   name: 'workflow-telemetry',
 });
+
 

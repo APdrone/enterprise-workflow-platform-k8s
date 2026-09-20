@@ -1,18 +1,31 @@
-import { Kafka, Consumer, EachMessagePayload } from 'kafkajs';
-import { WorkflowKafkaEvent, NotificationRecord } from '@workflow/shared-types';
-import { validateEvent } from '@workflow/shared-schemas';
-import { getTracer, getMetrics } from '@workflow/telemetry';
+import { Kafka, Consumer, Producer, EachMessagePayload } from 'kafkajs';
+import { WorkflowKafkaEvent, NotificationRecord, DLQErrorType } from '@workflow/shared-types';
+import {
+  validateEvent,
+  TOPIC_WORKFLOW_EVENTS,
+  TOPIC_WORKFLOW_RETRY,
+  TOPIC_WORKFLOW_DLQ,
+  MAX_RETRY_COUNT,
+  calculateBackoffDelay,
+  buildResilienceHeaders,
+} from '@workflow/shared-schemas';
+import { getTracer, getMetrics, getLogger, traceStorage } from '@workflow/telemetry';
 import { notificationStore } from './store.js';
+import { sseManager } from './sse.js';
 
 const tracer = getTracer('notification-service');
 const metrics = getMetrics('notification-service');
+const logger = getLogger('notification-service');
+
 
 export class NotificationConsumer {
   private kafka?: Kafka;
   private consumer?: Consumer;
-  private isConnected: boolean = false;
+  private producer?: Producer;
+  public isConnected: boolean = false;
 
   constructor() {
+
     const brokers = (process.env.KAFKA_BROKERS || 'localhost:9092').split(',');
     this.kafka = new Kafka({
       clientId: 'notification-service',
@@ -26,17 +39,22 @@ export class NotificationConsumer {
     this.consumer = this.kafka.consumer({
       groupId: process.env.KAFKA_GROUP_ID || 'notification-service-group',
     });
+
+    this.producer = this.kafka.producer({
+      allowAutoTopicCreation: true,
+    });
   }
 
   async start(): Promise<void> {
     try {
-      if (!this.consumer) return;
+      if (!this.consumer || !this.producer) return;
+      await this.producer.connect();
       await this.consumer.connect();
       this.isConnected = true;
-      console.log('[notification-service] Connected to Kafka brokers.');
+      console.log('[notification-service] Connected to Kafka producer and consumer.');
 
       await this.consumer.subscribe({
-        topic: 'workflow.events',
+        topics: [TOPIC_WORKFLOW_EVENTS, TOPIC_WORKFLOW_RETRY],
         fromBeginning: true,
       });
 
@@ -46,7 +64,7 @@ export class NotificationConsumer {
         },
       });
 
-      console.log('[notification-service] Listening on workflow.events topic.');
+      console.log('[notification-service] Listening on workflow.events and workflow.events.retry topics.');
     } catch (error) {
       console.warn(
         '[notification-service] Could not connect to Kafka. Running in standalone mode:',
@@ -57,46 +75,105 @@ export class NotificationConsumer {
   }
 
   async stop(): Promise<void> {
-    if (this.consumer && this.isConnected) {
-      await this.consumer.disconnect();
+    if (this.isConnected) {
+      if (this.consumer) await this.consumer.disconnect();
+      if (this.producer) await this.producer.disconnect();
     }
     this.isConnected = false;
   }
 
   async processMessage(payload: EachMessagePayload): Promise<void> {
+    const { topic } = payload;
     const rawValue = payload.message.value?.toString('utf-8');
     if (!rawValue) return;
 
-    const traceparent = payload.message.headers?.['traceparent']?.toString();
-    const correlationId = payload.message.headers?.['x-correlation-id']?.toString();
+    const rawHeaders: Record<string, string> = {};
+    if (payload.message.headers) {
+      for (const [key, val] of Object.entries(payload.message.headers)) {
+        if (val) rawHeaders[key] = val.toString();
+      }
+    }
 
-    let eventType = 'unknown';
+    const traceparent = rawHeaders['traceparent'];
+    const correlationId = rawHeaders['x-correlation-id'];
+    const retryCount = parseInt(rawHeaders['x-retry-count'] || '0', 10);
+    const key = payload.message.key?.toString();
+
+    let parsedEvent: any;
+    try {
+      parsedEvent = JSON.parse(rawValue);
+    } catch (parseErr: any) {
+      logger.error('Unparseable JSON message received. Routing to DLQ', { topic, correlationId, traceId: traceparent }, parseErr);
+      await this.routeToDLQ({
+        originalTopic: topic,
+        key,
+        rawValue,
+        errorType: 'UNPARSEABLE_JSON',
+        errorMessage: `JSON parse error: ${parseErr.message}`,
+        retryCount,
+        correlationId,
+        traceparent,
+      });
+      return;
+    }
+
+    const event = parsedEvent as WorkflowKafkaEvent;
+    const eventType = event.type || 'unknown';
+
+    const span = tracer.startSpan(`Kafka Consume: ${eventType}`, traceparent);
+    span.setAttribute('kafka.topic', topic);
+    span.setAttribute('kafka.partition', payload.partition);
+    if (event.data?.tenantId) span.setAttribute('tenant.id', event.data.tenantId);
+    if (correlationId) span.setAttribute('correlation.id', correlationId);
+
+    traceStorage.enterWith({
+      span,
+      traceparent: span.toTraceparent(),
+      tenantId: event.data?.tenantId,
+    });
+
+    const eventLogger = logger.child({
+      traceId: span.context.traceId,
+      spanId: span.context.spanId,
+      tenantId: event.data?.tenantId,
+      correlationId,
+      workflowId: event.data?.workflowId,
+    });
+
+    // Validate schema
+    const validation = validateEvent(event.type, event);
+    if (!validation.valid) {
+      const errorMsg = validation.errors?.join(', ') || 'Schema validation failed';
+      eventLogger.warn(`Invalid schema for ${event.type}. Routing to DLQ`, { errorMsg });
+      span.status = 'ERROR';
+      span.end();
+      metrics.kafkaEventsConsumed.inc({ event_type: eventType, status: 'schema_error' });
+
+      await this.routeToDLQ({
+        originalTopic: topic,
+        key,
+        rawValue,
+        errorType: 'SCHEMA_VALIDATION_ERROR',
+        errorMessage: errorMsg,
+        retryCount,
+        tenantId: event.data?.tenantId,
+        workflowId: event.data?.workflowId,
+        correlationId,
+        traceparent,
+      });
+      return;
+    }
+
+    // Handle retry backoff
+    if (topic === TOPIC_WORKFLOW_RETRY && retryCount > 0) {
+      const delay = calculateBackoffDelay(retryCount);
+      eventLogger.info(`Processing retry attempt #${retryCount} after ${delay}ms backoff`, { retryCount, delay });
+    }
 
     try {
-      const event: WorkflowKafkaEvent = JSON.parse(rawValue);
-      eventType = event.type;
-
-      const span = tracer.startSpan(`Kafka Consume: ${event.type}`, traceparent);
-      span.setAttribute('kafka.topic', payload.topic);
-      span.setAttribute('kafka.partition', payload.partition);
-      span.setAttribute('tenant.id', event.data.tenantId);
-      if (correlationId) {
-        span.setAttribute('correlation.id', correlationId);
-      }
-
-      // Validate schema
-      const validation = validateEvent(event.type, event);
-      if (!validation.valid) {
-        console.warn(`[notification-service] Invalid event schema received: ${validation.errors?.join(', ')}`);
-        span.status = 'ERROR';
-        span.end();
-        metrics.kafkaEventsConsumed.inc({ event_type: eventType, status: 'schema_error' });
-        return;
-      }
-
       // Idempotency check: Ignore duplicate events
       if (notificationStore.hasProcessedEvent(event.id)) {
-        console.log(`[notification-service] Duplicate event ignored: ${event.id}`);
+        eventLogger.info(`Duplicate event ignored: ${event.id}`, { eventId: event.id });
         span.end();
         metrics.kafkaEventsConsumed.inc({ event_type: eventType, status: 'duplicate_ignored' });
         return;
@@ -108,18 +185,126 @@ export class NotificationConsumer {
       const notification = this.createNotificationFromEvent(event);
       if (notification) {
         notificationStore.addNotification(notification);
-        console.log(
-          `🔔 [NOTIFICATION DISPATCHED] To: ${notification.recipientId} | Type: ${notification.type} | "${notification.title}" - ${notification.body}`
-        );
+        eventLogger.info(`Notification dispatched to ${notification.recipientId}`, {
+          recipientId: notification.recipientId,
+          type: notification.type,
+          title: notification.title,
+        });
       }
+
+      // Real-time SSE Broadcast to active UI clients
+      sseManager.broadcast(
+        event.data.tenantId,
+        {
+          type: event.type,
+          data: event.data,
+          notification: notification || undefined,
+        },
+        notification?.recipientId
+      );
 
       span.end();
       metrics.kafkaEventsConsumed.inc({ event_type: eventType, status: 'processed' });
-    } catch (err) {
-      console.error('[notification-service] Error processing message:', err);
+    } catch (err: any) {
+      eventLogger.error(`Error processing notification (attempt ${retryCount}/${MAX_RETRY_COUNT})`, { retryCount }, err);
+      span.status = 'ERROR';
+      span.end();
       metrics.kafkaEventsConsumed.inc({ event_type: eventType, status: 'error' });
+
+
+      if (retryCount < MAX_RETRY_COUNT) {
+        await this.routeToRetry({
+          originalTopic: topic === TOPIC_WORKFLOW_RETRY ? (rawHeaders['x-original-topic'] || TOPIC_WORKFLOW_EVENTS) : topic,
+          key,
+          rawValue,
+          errorType: 'PROCESSING_ERROR',
+          errorMessage: err.message || 'Notification processing error',
+          retryCount: retryCount + 1,
+          tenantId: event.data?.tenantId,
+          workflowId: event.data?.workflowId,
+          correlationId,
+          traceparent,
+        });
+      } else {
+        await this.routeToDLQ({
+          originalTopic: rawHeaders['x-original-topic'] || topic,
+          key,
+          rawValue,
+          errorType: 'MAX_RETRIES_EXCEEDED',
+          errorMessage: `Exceeded max retries (${MAX_RETRY_COUNT}): ${err.message}`,
+          retryCount,
+          tenantId: event.data?.tenantId,
+          workflowId: event.data?.workflowId,
+          correlationId,
+          traceparent,
+        });
+      }
     }
   }
+
+  private async routeToRetry(opts: {
+    originalTopic: string;
+    key?: string;
+    rawValue: string;
+    errorType: DLQErrorType;
+    errorMessage: string;
+    retryCount: number;
+    tenantId?: string;
+    workflowId?: string;
+    correlationId?: string;
+    traceparent?: string;
+  }): Promise<void> {
+    if (!this.producer || !this.isConnected) return;
+    try {
+      const headers = buildResilienceHeaders(opts);
+      await this.producer.send({
+        topic: TOPIC_WORKFLOW_RETRY,
+        messages: [
+          {
+            key: opts.key,
+            value: opts.rawValue,
+            headers,
+          },
+        ],
+      });
+      console.log(`[notification-service] Sent message to ${TOPIC_WORKFLOW_RETRY} (Retry #${opts.retryCount})`);
+    } catch (err) {
+      console.error('[notification-service] Failed to route message to retry topic:', err);
+    }
+  }
+
+  private async routeToDLQ(opts: {
+    originalTopic: string;
+    key?: string;
+    rawValue: string;
+    errorType: DLQErrorType;
+    errorMessage: string;
+    retryCount: number;
+    tenantId?: string;
+    workflowId?: string;
+    correlationId?: string;
+    traceparent?: string;
+  }): Promise<void> {
+    if (!this.producer || !this.isConnected) return;
+    try {
+      const headers = buildResilienceHeaders(opts);
+      await this.producer.send({
+        topic: TOPIC_WORKFLOW_DLQ,
+        messages: [
+          {
+            key: opts.key,
+            value: opts.rawValue,
+            headers,
+          },
+        ],
+      });
+      metrics.dlqMessagesTotal.inc({ error_type: opts.errorType });
+      logger.warn(`Poison-pill / failed message routed to ${TOPIC_WORKFLOW_DLQ}`, { errorType: opts.errorType, correlationId: opts.correlationId });
+    } catch (err: any) {
+      logger.error('Failed to route message to DLQ topic', { errorType: opts.errorType }, err);
+    }
+  }
+
 
   private createNotificationFromEvent(event: WorkflowKafkaEvent): NotificationRecord | null {
     const { data, type } = event;

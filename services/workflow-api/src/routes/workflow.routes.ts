@@ -41,36 +41,55 @@ export const workflowRoutes: FastifyPluginAsync = async (fastify: FastifyInstanc
     };
   });
 
-  // Healthcheck
+  // Liveness Probe (checks process alive)
   fastify.get('/health', async () => {
     return {
       status: 'ok',
       service: 'workflow-api',
       timestamp: new Date().toISOString(),
+      uptimeSeconds: Math.floor(process.uptime()),
+    };
+  });
+
+  fastify.get('/health/live', async () => {
+    return {
+      status: 'ok',
+      service: 'workflow-api',
+      timestamp: new Date().toISOString(),
+      uptimeSeconds: Math.floor(process.uptime()),
     };
   });
 
   // Readiness Probe (checks DB & Kafka connections)
-  fastify.get('/ready', async (_, reply) => {
+  const readinessHandler = async (_: any, reply: any) => {
     try {
       await pool.query('SELECT 1');
       return reply.status(200).send({
         status: 'ready',
         service: 'workflow-api',
-        db: 'ok',
-        kafka: eventProducer.isConnected ? 'ok' : 'mock-or-degraded',
+        checks: {
+          database: 'ok',
+          kafka: eventProducer.isConnected ? 'ok' : 'mock-or-degraded',
+        },
         timestamp: new Date().toISOString(),
       });
     } catch (err: any) {
       return reply.status(503).send({
         status: 'not_ready',
         service: 'workflow-api',
-        db: 'error',
+        checks: {
+          database: 'error',
+          kafka: eventProducer.isConnected ? 'ok' : 'disconnected',
+        },
         error: err.message,
         timestamp: new Date().toISOString(),
       });
     }
-  });
+  };
+
+  fastify.get('/ready', readinessHandler);
+  fastify.get('/health/ready', readinessHandler);
+
 
   // Create workflow (Draft)
   fastify.post<{ Body: CreateWorkflowDTO }>('/api/v1/workflows', async (request, reply) => {

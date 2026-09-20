@@ -19,7 +19,7 @@
       "properties": {
         "workflowId": { "type": "string", "format": "uuid" },
         "tenantId": { "type": "string", "minLength": 1 },
-        "type": { "type": "string", "enum": ["EXPENSE", "LEAVE", "PURCHASE_ORDER", "GENERIC"] },
+        "type": { "type": "string", "enum": ["EXPENSE", "LEAVE", "PURCHASE_ORDER", "ACCESS", "GENERIC"] },
         "title": { "type": "string", "minLength": 1, "maxLength": 255 },
         "amount": { "type": "number", "minimum": 0 },
         "currency": { "type": "string", "minLength": 3, "maxLength": 3 },

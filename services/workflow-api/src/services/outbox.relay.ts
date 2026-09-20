@@ -3,6 +3,10 @@ import { db } from '../db/client.js';
 import { outboxEvents } from '../db/schema.js';
 import { eventProducer } from '../kafka/producer.js';
 import { WorkflowKafkaEvent } from '@workflow/shared-types';
+import { getLogger, getMetrics } from '@workflow/telemetry';
+
+const logger = getLogger('workflow-api');
+const metrics = getMetrics('workflow-api');
 
 export class OutboxRelayService {
   private intervalId: NodeJS.Timeout | null = null;
@@ -31,6 +35,8 @@ export class OutboxRelayService {
       retryCount: 0,
       createdAt: new Date(),
     });
+
+    metrics.outboxUnpublishedEvents.inc();
   }
 
   async relayEventImmediately(eventId: string): Promise<boolean> {
@@ -59,9 +65,11 @@ export class OutboxRelayService {
         })
         .where(eq(outboxEvents.id, eventId));
 
+      metrics.kafkaEventsPublished.inc({ event_type: event.type });
+      metrics.outboxUnpublishedEvents.dec();
       return true;
     } catch (err: any) {
-      console.warn(`[OutboxRelay] Immediate publish failed for event ${eventId}, will retry in background:`, err.message);
+      logger.warn(`Immediate outbox publish failed for event ${eventId}, will retry in background`, { eventId }, err);
       await db
         .update(outboxEvents)
         .set({
@@ -77,6 +85,7 @@ export class OutboxRelayService {
     if (this.isProcessing) return { relayed: 0, errors: 0 };
     this.isProcessing = true;
 
+    const startTime = Date.now();
     let relayed = 0;
     let errors = 0;
 
@@ -87,6 +96,8 @@ export class OutboxRelayService {
         .where(eq(outboxEvents.published, false))
         .orderBy(asc(outboxEvents.createdAt))
         .limit(batchSize);
+
+      metrics.outboxUnpublishedEvents.set({}, pending.length);
 
       for (const record of pending) {
         try {
@@ -103,9 +114,11 @@ export class OutboxRelayService {
             })
             .where(eq(outboxEvents.id, record.id));
 
+          metrics.kafkaEventsPublished.inc({ event_type: event.type });
           relayed++;
         } catch (err: any) {
           errors++;
+          logger.error(`Error dispatching outbox event ${record.id}`, { eventId: record.id, tenantId: record.tenantId }, err);
           await db
             .update(outboxEvents)
             .set({
@@ -115,6 +128,10 @@ export class OutboxRelayService {
             .where(eq(outboxEvents.id, record.id));
         }
       }
+
+      if (pending.length > 0) {
+        metrics.outboxRelayDuration.observe({}, (Date.now() - startTime) / 1000);
+      }
     } finally {
       this.isProcessing = false;
     }
@@ -122,16 +139,18 @@ export class OutboxRelayService {
     return { relayed, errors };
   }
 
+
   startWorker(intervalMs: number = 1000): void {
     if (this.intervalId) return;
     this.intervalId = setInterval(async () => {
       try {
         await this.relayUnpublishedEvents();
-      } catch (err) {
-        console.error('[OutboxRelay] Background relay error:', err);
+      } catch (err: any) {
+        logger.error('Background outbox relay worker error', {}, err);
       }
     }, intervalMs);
   }
+
 
   stopWorker(): void {
     if (this.intervalId) {

@@ -1,0 +1,46 @@
+groups:
+  - name: workflow_platform_alerts
+    rules:
+      - alert: HighHttpErrorRate
+        expr: sum(rate(http_requests_total{status_code=~"5.."}[5m])) by (service) / sum(rate(http_requests_total[5m])) by (service) > 0.01
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High HTTP 5xx error rate on {{ $labels.service }}"
+          description: "Service {{ $labels.service }} has a 5xx error rate exceeding 1% over the last 5 minutes."
+
+      - alert: OutboxBacklogHigh
+        expr: outbox_unpublished_events_total > 50
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Transactional Outbox backlog growing"
+          description: "There are {{ $value }} unpublished events pending in the outbox for more than 2 minutes."
+
+      - alert: DeadLetterQueueSurge
+        expr: sum(increase(dlq_messages_total[5m])) by (service, error_type) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Dead Letter Queue activity detected on {{ $labels.service }}"
+          description: "Poison pills or failed messages with error type {{ $labels.error_type }} detected in {{ $labels.service }} DLQ."
+
+      - alert: ServiceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Service instance {{ $labels.instance }} is down"
+          description: "Target {{ $labels.job }} at {{ $labels.instance }} has been unreachable for more than 1 minute."
+
+      - alert: DatabasePoolWaitingClients
+        expr: pg_pool_waiting_clients > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PostgreSQL connection pool contention on {{ $labels.service }}"
+          description: "Clients are queuing for database connections in {{ $labels.service }}."

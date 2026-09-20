@@ -1,10 +1,13 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext.js';
+import { useSSE } from '../context/SSEContext.js';
 import { AuditEventRecord } from '@workflow/shared-types';
+import { buildAuthHeaders, tracedFetch } from '../utils/api.js';
 import { Shield, Clock, Search, FileJson, CheckCircle } from 'lucide-react';
 
 export const AuditPage: React.FC = () => {
   const { tenantId, auditApiUrl, apiUrl, currentUser } = useAuth();
+  const { refreshSignal } = useSSE();
   const [workflows, setWorkflows] = useState<Array<{ id: string; title: string }>>([]);
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string>('');
   const [auditEvents, setAuditEvents] = useState<AuditEventRecord[]>([]);
@@ -15,12 +18,8 @@ export const AuditPage: React.FC = () => {
   useEffect(() => {
     async function loadWorkflowList() {
       try {
-        const res = await fetch(`${apiUrl}/api/v1/workflows`, {
-          headers: {
-            'x-tenant-id': tenantId,
-            'x-user-id': currentUser.id,
-            'x-user-name': currentUser.name,
-          },
+        const res = await tracedFetch(`${apiUrl}/api/v1/workflows`, {
+          headers: buildAuthHeaders(tenantId, currentUser),
         });
         const json = await res.json();
         if (json.success && json.data?.workflows) {
@@ -35,16 +34,14 @@ export const AuditPage: React.FC = () => {
       }
     }
     loadWorkflowList();
-  }, [tenantId, apiUrl, currentUser]);
+  }, [tenantId, apiUrl, currentUser, refreshSignal]);
 
   const fetchAuditTrail = useCallback(async (wfId: string) => {
     if (!wfId) return;
     setLoading(true);
     try {
-      const res = await fetch(`${auditApiUrl}/api/v1/audit/${wfId}`, {
-        headers: {
-          'x-tenant-id': tenantId,
-        },
+      const res = await tracedFetch(`${auditApiUrl}/api/v1/audit/${wfId}`, {
+        headers: buildAuthHeaders(tenantId, currentUser),
       });
       const json = await res.json();
       if (json.success && json.data) {
@@ -64,7 +61,7 @@ export const AuditPage: React.FC = () => {
     if (selectedWorkflowId) {
       fetchAuditTrail(selectedWorkflowId);
     }
-  }, [selectedWorkflowId, fetchAuditTrail]);
+  }, [selectedWorkflowId, fetchAuditTrail, refreshSignal]);
 
   return (
     <div>

@@ -1,11 +1,14 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext.js';
+import { useSSE } from '../context/SSEContext.js';
 import { Workflow, CreateWorkflowDTO } from '@workflow/shared-types';
 import { WorkflowWidget } from '@workflow/workflow-widget';
+import { buildAuthHeaders, tracedFetch } from '../utils/api.js';
 import { PlusCircle, RefreshCw, DollarSign, Calendar, FileText, ChevronRight } from 'lucide-react';
 
 export const ExpensesPage: React.FC = () => {
   const { tenantId, currentUser, apiUrl } = useAuth();
+  const { refreshSignal } = useSSE();
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(null);
@@ -21,12 +24,8 @@ export const ExpensesPage: React.FC = () => {
   const fetchWorkflows = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${apiUrl}/api/v1/workflows`, {
-        headers: {
-          'x-tenant-id': tenantId,
-          'x-user-id': currentUser.id,
-          'x-user-name': currentUser.name,
-        },
+      const res = await tracedFetch(`${apiUrl}/api/v1/workflows`, {
+        headers: buildAuthHeaders(tenantId, currentUser),
       });
       const json = await res.json();
       if (json.success && json.data) {
@@ -45,7 +44,7 @@ export const ExpensesPage: React.FC = () => {
 
   useEffect(() => {
     fetchWorkflows();
-  }, [tenantId]); // Re-fetch on tenant switch
+  }, [tenantId, refreshSignal]); // Re-fetch on tenant switch or live SSE event
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -63,14 +62,9 @@ export const ExpensesPage: React.FC = () => {
         metadata: { department: 'Engineering' },
       };
 
-      const res = await fetch(`${apiUrl}/api/v1/workflows`, {
+      const res = await tracedFetch(`${apiUrl}/api/v1/workflows`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-tenant-id': tenantId,
-          'x-user-id': currentUser.id,
-          'x-user-name': currentUser.name,
-        },
+        headers: buildAuthHeaders(tenantId, currentUser),
         body: JSON.stringify(payload),
       });
 

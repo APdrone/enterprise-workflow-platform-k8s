@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@workflow/shared-types": "*",
+    "@workflow/telemetry": "*",
     "@workflow/workflow-widget": "*",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",

@@ -9,6 +9,7 @@ COPY apps/host-app/ ./apps/host-app/
 
 RUN npm ci
 RUN npm run build --workspace=@workflow/shared-types
+RUN npm run build --workspace=@workflow/telemetry
 RUN npm run build --workspace=@workflow/workflow-widget
 RUN npm run build --workspace=@workflow/host-app
 

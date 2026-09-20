@@ -5,6 +5,15 @@ import { delegationService } from '../../services/workflow-api/src/services/dele
 import { db } from '../../services/workflow-api/src/db/client.js';
 import { buildCreateWorkflowDTO } from '../../packages/test-utils/src/factories/workflow.factory.js';
 
+vi.mock('../../services/workflow-api/src/db/client.js', () => ({
+  db: {
+    insert: vi.fn(() => ({ values: vi.fn().mockResolvedValue(undefined) })),
+    update: vi.fn(() => ({ set: vi.fn(() => ({ where: vi.fn().mockResolvedValue(undefined) })) })),
+    select: vi.fn(() => ({ from: vi.fn(() => ({ where: vi.fn(() => ({ limit: vi.fn().mockResolvedValue([]) })) })) })),
+  },
+  pool: { end: vi.fn() },
+}));
+
 describe('Workflow State Machine & Business Logic Unit Tests', () => {
   let service: WorkflowService;
   const mockTenantA = 'tenant-test-a';
@@ -13,7 +22,7 @@ describe('Workflow State Machine & Business Logic Unit Tests', () => {
 
   beforeEach(() => {
     service = new WorkflowService();
-    vi.restoreAllMocks();
+    vi.clearAllMocks();
     vi.spyOn(outboxRelayService, 'saveToOutbox').mockResolvedValue(undefined);
     vi.spyOn(outboxRelayService, 'relayEventImmediately').mockResolvedValue(true);
   });
@@ -91,18 +100,16 @@ describe('Workflow State Machine & Business Logic Unit Tests', () => {
 
     expect(result.status).toBe('PENDING');
     expect(outboxSpy).toHaveBeenCalledTimes(1);
-    expect(outboxSpy).toHaveBeenCalledWith(
-      mockTenantA,
-      'wf-100',
-      expect.objectContaining({
-        type: 'workflow.submitted.v1',
-        data: expect.objectContaining({
-          workflowId: 'wf-100',
-          previousStatus: 'DRAFT',
-          currentStatus: 'PENDING',
-        }),
-      })
-    );
+    expect(outboxSpy.mock.calls[0][0]).toBe(mockTenantA);
+    expect(outboxSpy.mock.calls[0][1]).toBe('wf-100');
+    expect(outboxSpy.mock.calls[0][2]).toMatchObject({
+      type: 'workflow.submitted.v1',
+      data: expect.objectContaining({
+        workflowId: 'wf-100',
+        previousStatus: 'DRAFT',
+        currentStatus: 'PENDING',
+      }),
+    });
   });
 
   it('multi-step progression: advances step 1 to step 2 on first approval', async () => {
@@ -149,18 +156,16 @@ describe('Workflow State Machine & Business Logic Unit Tests', () => {
 
     expect(result.status).toBe('PENDING');
     expect(result.currentStepOrder).toBe(2);
-    expect(outboxSpy).toHaveBeenCalledWith(
-      mockTenantA,
-      'wf-multi-1',
-      expect.objectContaining({
-        type: 'workflow.step_approved.v1',
-        data: expect.objectContaining({
-          currentStepOrder: 1,
-          totalSteps: 2,
-          currentStatus: 'PENDING',
-        }),
-      })
-    );
+    expect(outboxSpy.mock.calls[0][0]).toBe(mockTenantA);
+    expect(outboxSpy.mock.calls[0][1]).toBe('wf-multi-1');
+    expect(outboxSpy.mock.calls[0][2]).toMatchObject({
+      type: 'workflow.step_approved.v1',
+      data: expect.objectContaining({
+        currentStepOrder: 1,
+        totalSteps: 2,
+        currentStatus: 'PENDING',
+      }),
+    });
   });
 
   it('delegation authorization: allows proxy approver when active delegation exists', async () => {
@@ -208,17 +213,15 @@ describe('Workflow State Machine & Business Logic Unit Tests', () => {
     });
 
     expect(result.status).toBe('APPROVED');
-    expect(outboxSpy).toHaveBeenCalledWith(
-      mockTenantA,
-      'wf-del-1',
-      expect.objectContaining({
-        type: 'workflow.approved.v1',
-        data: expect.objectContaining({
-          isDelegated: true,
-          delegatedFrom: 'manager-main',
-        }),
-      })
-    );
+    expect(outboxSpy.mock.calls[0][0]).toBe(mockTenantA);
+    expect(outboxSpy.mock.calls[0][1]).toBe('wf-del-1');
+    expect(outboxSpy.mock.calls[0][2]).toMatchObject({
+      type: 'workflow.approved.v1',
+      data: expect.objectContaining({
+        isDelegated: true,
+        delegatedFrom: 'manager-main',
+      }),
+    });
   });
 
   it('rejects invalid state transition: Cannot submit a workflow that is already APPROVED', async () => {
@@ -282,18 +285,16 @@ describe('Workflow State Machine & Business Logic Unit Tests', () => {
 
     expect(result.status).toBe('REJECTED');
     expect(result.rejectionReason).toBe('Over budget for Q3');
-    expect(outboxSpy).toHaveBeenCalledWith(
-      mockTenantA,
-      'wf-400',
-      expect.objectContaining({
-        type: 'workflow.rejected.v1',
-        data: expect.objectContaining({
-          workflowId: 'wf-400',
-          currentStatus: 'REJECTED',
-          rejectionReason: 'Over budget for Q3',
-        }),
-      })
-    );
+    expect(outboxSpy.mock.calls[0][0]).toBe(mockTenantA);
+    expect(outboxSpy.mock.calls[0][1]).toBe('wf-400');
+    expect(outboxSpy.mock.calls[0][2]).toMatchObject({
+      type: 'workflow.rejected.v1',
+      data: expect.objectContaining({
+        workflowId: 'wf-400',
+        currentStatus: 'REJECTED',
+        rejectionReason: 'Over budget for Q3',
+      }),
+    });
   });
 
   it('fails rejection when reason is empty', async () => {
@@ -351,12 +352,10 @@ describe('Workflow State Machine & Business Logic Unit Tests', () => {
     });
 
     expect(result.status).toBe('CANCELLED');
-    expect(outboxSpy).toHaveBeenCalledWith(
-      mockTenantA,
-      'wf-500',
-      expect.objectContaining({
-        type: 'workflow.cancelled.v1',
-      })
-    );
+    expect(outboxSpy.mock.calls[0][0]).toBe(mockTenantA);
+    expect(outboxSpy.mock.calls[0][1]).toBe('wf-500');
+    expect(outboxSpy.mock.calls[0][2]).toMatchObject({
+      type: 'workflow.cancelled.v1',
+    });
   });
 });

@@ -18,12 +18,17 @@ This document provides step-by-step instructions to run, develop, interact with,
    - [Kafka UI Event Inspection (JSON Payloads)](#3-kafka-ui-event-inspection-httplocalhost8085)
    - [Distributed Tracing in Jaeger](#4-distributed-tracing-in-jaeger-httplocalhost16686)
    - [Prometheus Metrics Inspection](#5-prometheus-metrics-inspection-httplocalhost9090)
-6. [API Usage & Curl Examples (Multi-Step & Delegation)](#-api-usage--curl-examples-multi-step--delegation)
-7. [Automated Testing Guide](#-automated-testing-guide)
+6. [API Usage & Examples (Multi-Step & Delegation)](#-api-usage--examples-multi-step--delegation)
+7. [Manual Verification Scenarios (All Platform Enhancements)](#-manual-verification-scenarios-all-platform-enhancements)
+   - [Scenario 1: Real-Time Live Sync (Server-Sent Events)](#scenario-1-real-time-live-sync-server-sent-events)
+   - [Scenario 2: Kafka Dead Letter Queue (DLQ) & Consumer Resilience](#scenario-2-kafka-dead-letter-queue-dlq--consumer-resilience)
+   - [Scenario 3: Configurable Workflow Rules & Parallel Approvals (AND/OR Quorums)](#scenario-3-configurable-workflow-rules--parallel-approvals-andor-quorums)
+   - [Scenario 4: PostgreSQL Row-Level Security (RLS) Database Hardening](#scenario-4-postgresql-row-level-security-rls-database-hardening)
+8. [Automated Testing Guide](#-automated-testing-guide)
    - [Unit, Contract & Integration Tests (Vitest)](#1-run-unit-contract--integration-tests-vitest)
    - [End-to-End Tests (Playwright)](#2-run-end-to-end-automated-tests-playwright)
    - [Performance & Load Tests (k6)](#3-run-performance--load-tests-k6)
-8. [Teardown & Cleanup](#-teardown--cleanup)
+9. [Teardown & Cleanup](#-teardown--cleanup)
 
 ---
 
@@ -119,6 +124,7 @@ kubectl get pods -n workflow-platform -o wide
   kubectl port-forward -n workflow-platform svc/workflow-api 3000:3000
   kubectl port-forward -n workflow-platform svc/notification-service 3001:3001
   kubectl port-forward -n workflow-platform svc/audit-service 3002:3002
+  kubectl port-forward -n workflow-platform svc/grafana 3005:3005
   kubectl port-forward -n workflow-platform svc/jaeger 16686:16686
   kubectl port-forward -n workflow-platform svc/prometheus 9090:9090
   kubectl port-forward -n workflow-platform svc/kafka-ui 8085:8085
@@ -194,13 +200,14 @@ When you have created test expenses, approvals, and audit records and want to wi
 
 | Component / Tool | Port (Local / K8s) | Working URL | Description |
 |---|---|---|---|
-| **Host Application (React + Vite)** | `5173` / `8080` | [http://localhost:5173](http://localhost:5173) | Main UI: Multi-step Expense management, Approvals inbox, Audit log, Notifications |
+| **Host Application (React + Vite)** | `5173` / `8080` | [http://localhost:8080](http://localhost:8080) | Main UI: Real-Time SSE Sync, Expenses, Parallel Approvals, Audit Log & W3C Tracing |
 | **Workflow Widget Preview** | `3003` | [http://localhost:3003](http://localhost:3003) | Standalone demo page for `<workflow-widget>` Web Component |
-| **Workflow API** | `3000` | [http://localhost:3000](http://localhost:3000) | Fastify REST API: Multi-step state machine, Outbox relay, Delegations & Idempotency |
-| **Notification Service** | `3001` | [http://localhost:3001](http://localhost:3001) | Kafka event consumer & multi-step notification query API |
-| **Audit Service** | `3002` | [http://localhost:3002](http://localhost:3002) | Kafka event consumer & immutable audit trail REST API |
-| **Jaeger Tracing UI** | `16686` | [http://localhost:16686](http://localhost:16686) | Visual distributed trace explorer (OTLP receiver on `:4318`) |
-| **Prometheus Server** | `9090` | [http://localhost:9090](http://localhost:9090) | Prometheus metrics dashboard (scrapes `/metrics`) |
+| **Workflow API** | `3000` | [http://localhost:3000/ready](http://localhost:3000/ready) | Fastify REST API: Multi-step state machine, Deep Health Probes, Outbox relay, Delegations & RLS |
+| **Notification Service** | `3001` | [http://localhost:3001/health](http://localhost:3001/health) | Kafka event consumer, alerts API & SSE live stream (`/api/v1/stream`) |
+| **Audit Service** | `3002` | [http://localhost:3002/health](http://localhost:3002/health) | Kafka event consumer & immutable audit trail REST API |
+| **Grafana Dashboards** | `3005` | [http://localhost:3005](http://localhost:3005) | Provisioned Dashboards: System Health, DB Pool & Outbox Reliability |
+| **Jaeger Tracing UI** | `16686` | [http://localhost:16686](http://localhost:16686) | Visual distributed trace explorer (OTLP receiver on `:4318`) with DB Query Spans |
+| **Prometheus Server** | `9090` | [http://localhost:9090](http://localhost:9090) | Prometheus metrics dashboard & alerting rules (scrapes `/metrics`) |
 | **Kafka UI** | `8085` | [http://localhost:8085](http://localhost:8085) | Web UI for inspecting Kafka topics, partitions, consumer groups, and messages |
 | **Pact Broker** | `9292` | [http://localhost:9292](http://localhost:9292) | Consumer-Driven Contract testing broker |
 | **PostgreSQL** | `5433` | `localhost:5433` | Databases: `workflow_db`, `audit_db`, `pact_db` (User: `postgres`, Pass: `postgres`) |
@@ -703,6 +710,337 @@ curl -X POST http://localhost:3000/api/v1/workflows/<WORKFLOW_ID>/approve \
   -H "x-user-name: Proxy Colleague" \
   -d '{ "comment": "Step 2 approved as delegate for manager" }'
 ```
+
+---
+
+## 🎯 Manual Verification Scenarios (All Platform Enhancements)
+
+This section contains dedicated, copy-paste test scenarios covering all 4 platform enhancements with dual PowerShell and Bash/cURL commands.
+
+---
+
+### Scenario 1: Real-Time Live Sync (Server-Sent Events)
+
+**Objective**: Verify that workflow state changes, approvals, and alerts instantly propagate to connected web clients with zero polling latency.
+
+#### Method A: Multi-Browser Tab Verification
+1. Open **Tab 1** at [http://localhost:8080](http://localhost:8080) and set persona to **Bob Martinez (Approver / Team Lead)** on the **Approvals** page.
+2. Open **Tab 2** (or an Incognito window) at [http://localhost:8080](http://localhost:8080) and set persona to **Alice Johnson (Requester)** on the **Expenses** page.
+3. In **Tab 2**, create and submit an expense of `$500.00`.
+4. **Observe Tab 1**:
+   - The Approvals inbox badge updates immediately.
+   - A live toast notification popup appears in the top-right corner with zero page refreshes or polling lag.
+
+#### Method B: CLI SSE Stream Handshake Test
+**PowerShell:**
+```powershell
+# Open live SSE stream for tenant-corp-a
+$req = [System.Net.HttpWebRequest]::Create("http://localhost:3001/api/v1/stream?tenantId=tenant-corp-a&userId=user-bob")
+$resp = $req.GetResponse()
+$stream = $resp.GetResponseStream()
+$reader = New-Object System.IO.StreamReader($stream)
+$reader.ReadLine()
+$reader.ReadLine()
+$resp.Close()
+```
+
+**Bash / cURL:**
+```bash
+curl -N -s "http://localhost:3001/api/v1/stream?tenantId=tenant-corp-a&userId=user-bob" | head -n 5
+```
+
+**Expected Output:**
+```json
+data: {"type":"connected","clientId":"client-...","timestamp":"..."}
+```
+
+---
+
+### Scenario 2: Kafka Dead Letter Queue (DLQ) & Consumer Resilience
+
+**Objective**: Verify that malformed poison-pill messages or schema violations are safely isolated to `workflow.events.dlq` without blocking main consumer processing partitions, and can be inspected/replayed via REST API.
+
+#### Step 1: Inject a Poison Pill into Kafka (`workflow.events`)
+**PowerShell (inside pod):**
+```powershell
+kubectl exec -n workflow-platform $(kubectl get pods -n workflow-platform -l app=workflow-api -o jsonpath="{.items[0].metadata.name}") -- node -e '
+import("kafkajs").then(async ({ Kafka }) => {
+  const kafka = new Kafka({ clientId: "test-poison", brokers: ["kafka:9092"] });
+  const producer = kafka.producer();
+  await producer.connect();
+  await producer.send({
+    topic: "workflow.events",
+    messages: [{ key: "poison-key", value: "THIS IS MALFORMED NON-JSON POISON PILL" }]
+  });
+  await producer.disconnect();
+  console.log("Poison pill injected.");
+});'
+```
+
+**Bash / Git Bash (inside pod):**
+```bash
+kubectl exec -n workflow-platform $(kubectl get pods -n workflow-platform -l app=workflow-api -o jsonpath="{.items[0].metadata.name}") -- node -e '
+import("kafkajs").then(async ({ Kafka }) => {
+  const kafka = new Kafka({ clientId: "test-poison", brokers: ["kafka:9092"] });
+  const producer = kafka.producer();
+  await producer.connect();
+  await producer.send({
+    topic: "workflow.events",
+    messages: [{ key: "poison-key", value: "THIS IS MALFORMED NON-JSON POISON PILL" }]
+  });
+  await producer.disconnect();
+  console.log("Poison pill injected.");
+});'
+```
+
+#### Step 2: Query Dead-Lettered Messages from Audit Service
+**PowerShell:**
+```powershell
+Invoke-RestMethod -Uri "http://localhost:3002/api/v1/dlq/messages?limit=5" -Method Get | ConvertTo-Json -Depth 5
+```
+
+**Bash / cURL:**
+```bash
+curl -s http://localhost:3002/api/v1/dlq/messages?limit=5 | jq .
+```
+
+**Expected Output:**
+```json
+{
+  "success": true,
+  "data": {
+    "total": 1,
+    "messages": [
+      {
+        "id": "...",
+        "originalTopic": "workflow.events",
+        "errorType": "UNPARSEABLE_JSON",
+        "status": "DEAD_LETTERED"
+      }
+    ]
+  }
+}
+```
+
+#### Step 3: Replay Message from DLQ
+**PowerShell:**
+```powershell
+$dlqId = "<DLQ_RECORD_ID>"
+Invoke-RestMethod -Uri "http://localhost:3002/api/v1/dlq/replay/$dlqId" -Method Post | ConvertTo-Json
+```
+
+**Bash / cURL:**
+```bash
+curl -X POST "http://localhost:3002/api/v1/dlq/replay/<DLQ_RECORD_ID>"
+```
+
+---
+
+### Scenario 3: Configurable Workflow Rules & Parallel Approvals (AND/OR Quorums)
+
+**Objective**: Verify dynamic tenant matrix configuration and multi-reviewer parallel quorum evaluation.
+
+#### Step 1: Create a Dynamic Parallel Approval Rule
+**PowerShell:**
+```powershell
+$rulePayload = @'
+{
+  "name": "Security and Legal Dual Approval Gate",
+  "workflowType": "ACCESS",
+  "minAmount": 0,
+  "priority": 10,
+  "steps": [
+    { "stepOrder": 1, "name": "Legal Review", "approverRole": "LEGAL", "policy": "ALL_MUST_APPROVE", "parallelGroup": "gate-1" },
+    { "stepOrder": 1, "name": "Security Review", "approverRole": "SECURITY", "policy": "ALL_MUST_APPROVE", "parallelGroup": "gate-1" }
+  ]
+}
+'@
+
+Invoke-RestMethod -Uri "http://localhost:3000/api/v1/rules" -Method Post -Headers @{"x-tenant-id"="tenant-corp-a"} -ContentType "application/json" -Body $rulePayload | ConvertTo-Json -Depth 5
+```
+
+**Bash / cURL:**
+```bash
+curl -s -X POST http://localhost:3000/api/v1/rules \
+  -H "x-tenant-id: tenant-corp-a" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Security and Legal Dual Approval Gate",
+    "workflowType": "ACCESS",
+    "minAmount": 0,
+    "priority": 10,
+    "steps": [
+      { "stepOrder": 1, "name": "Legal Review", "approverRole": "LEGAL", "policy": "ALL_MUST_APPROVE", "parallelGroup": "gate-1" },
+      { "stepOrder": 1, "name": "Security Review", "approverRole": "SECURITY", "policy": "ALL_MUST_APPROVE", "parallelGroup": "gate-1" }
+    ]
+  }'
+```
+
+#### Step 2: Submit Workflow Matching Dynamic Rule
+**PowerShell:**
+```powershell
+$wf = Invoke-RestMethod -Uri "http://localhost:3000/api/v1/workflows" -Method Post -Headers @{"x-tenant-id"="tenant-corp-a"; "x-user-id"="user-alice"; "x-user-name"="Alice"} -ContentType "application/json" -Body '{"title":"Production Kubernetes Access","type":"ACCESS","amount":0}'
+$wfId = $wf.data.id
+
+# Submit
+Invoke-RestMethod -Uri "http://localhost:3000/api/v1/workflows/$wfId/submit" -Method Post -Headers @{"x-tenant-id"="tenant-corp-a"; "x-user-id"="user-alice"; "x-user-name"="Alice"} -ContentType "application/json" -Body '{"comment":"Access required"}' | ConvertTo-Json -Depth 5
+```
+
+**Bash / cURL:**
+```bash
+WF_RESP=$(curl -s -X POST http://localhost:3000/api/v1/workflows \
+  -H "x-tenant-id: tenant-corp-a" \
+  -H "x-user-id: user-alice" \
+  -H "x-user-name: Alice" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Production Kubernetes Access","type":"ACCESS","amount":0}')
+
+WF_ID=$(echo $WF_RESP | grep -o '"id":"[^"]*' | head -1 | cut -d'"' -f4)
+
+curl -s -X POST "http://localhost:3000/api/v1/workflows/${WF_ID}/submit" \
+  -H "x-tenant-id: tenant-corp-a" \
+  -H "x-user-id: user-alice" \
+  -H "x-user-name: Alice" \
+  -H "Content-Type: application/json" \
+  -d '{"comment":"Access required"}'
+```
+
+#### Step 3: Approve Step 1A (Workflow Stays in PENDING)
+**PowerShell:**
+```powershell
+# First parallel approval
+Invoke-RestMethod -Uri "http://localhost:3000/api/v1/workflows/$wfId/approve" -Method Post -Headers @{"x-tenant-id"="tenant-corp-a"; "x-user-id"="user-legal-1"; "x-user-role"="LEGAL"} -ContentType "application/json" -Body '{"stepId":"<STEP_1A_ID>","comment":"Legal cleared"}' | ConvertTo-Json -Depth 5
+```
+
+#### Step 4: Approve Step 1B (Quorum Reached -> Transitions to APPROVED)
+**PowerShell:**
+```powershell
+# Second parallel approval
+Invoke-RestMethod -Uri "http://localhost:3000/api/v1/workflows/$wfId/approve" -Method Post -Headers @{"x-tenant-id"="tenant-corp-a"; "x-user-id"="user-sec-1"; "x-user-role"="SECURITY"} -ContentType "application/json" -Body '{"stepId":"<STEP_1B_ID>","comment":"Security cleared"}' | ConvertTo-Json -Depth 5
+```
+
+---
+
+### Scenario 4: PostgreSQL Row-Level Security (RLS) Database Hardening
+
+**Objective**: Verify database engine-level isolation and WITH CHECK constraint enforcement against cross-tenant attacks.
+
+#### Step 1: Attempt Illegal Cross-Tenant Insert (Expect Engine Rejection)
+**PowerShell:**
+```powershell
+kubectl exec -n workflow-platform postgres-0 -- psql -U app_user -d workflow_db -c "BEGIN; SELECT set_config('app.current_tenant_id', 'tenant-corp-a', true); INSERT INTO workflows (id, tenant_id, type, title, requester_id, requester_name, status) VALUES ('wf-illegal-test', 'tenant-corp-b', 'EXPENSE', 'Cross Tenant Hack', 'user-1', 'Attacker', 'DRAFT'); COMMIT;"
+```
+
+**Bash / Git Bash:**
+```bash
+kubectl exec -n workflow-platform postgres-0 -- psql -U app_user -d workflow_db -c "BEGIN; SELECT set_config('app.current_tenant_id', 'tenant-corp-a', true); INSERT INTO workflows (id, tenant_id, type, title, requester_id, requester_name, status) VALUES ('wf-illegal-test', 'tenant-corp-b', 'EXPENSE', 'Cross Tenant Hack', 'user-1', 'Attacker', 'DRAFT'); COMMIT;"
+```
+
+**Expected PostgreSQL Error:**
+```
+ERROR:  new row violates row-level security policy for table "workflows"
+```
+
+#### Step 2: Query Workflows (Verify Isolation)
+**PowerShell:**
+```powershell
+kubectl exec -n workflow-platform postgres-0 -- psql -U app_user -d workflow_db -c "BEGIN; SELECT set_config('app.current_tenant_id', 'tenant-corp-a', true); SELECT tenant_id, count(*) FROM workflows GROUP BY tenant_id; COMMIT;"
+```
+
+**Bash / Git Bash:**
+```bash
+kubectl exec -n workflow-platform postgres-0 -- psql -U app_user -d workflow_db -c "BEGIN; SELECT set_config('app.current_tenant_id', 'tenant-corp-a', true); SELECT tenant_id, count(*) FROM workflows GROUP BY tenant_id; COMMIT;"
+```
+
+**Expected Result:**
+```
+   tenant_id   | count 
+---------------+-------
+ tenant-corp-a |     5
+---
+
+### Scenario 5: End-to-End Distributed Tracing & W3C Trace Context Propagation
+
+**Objective**: Verify that user actions from the browser automatically generate W3C `traceparent` and correlation headers, create child database spans in Fastify, and propagate across Kafka to consumers in Jaeger.
+
+#### Step 1: Submit an Expense or Step Approval in the Browser
+1. Open [http://localhost:8080/expenses](http://localhost:8080/expenses) in your browser.
+2. Create or select a workflow, and click **Submit for Approval** or **Approve Request**.
+3. In DevTools **Network $\rightarrow$ Headers**, verify outgoing request headers:
+   - `traceparent: 00-<trace_id>-<span_id>-01`
+   - `x-correlation-id: req-...`
+   - `x-tenant-id: tenant-corp-a`
+
+#### Step 2: Query Jaeger for Trace Graph & DB Query Spans
+**Browser:** Open Jaeger UI at [http://localhost:16686/search](http://localhost:16686/search), select service **`workflow-api`**, and click **Find Traces**.
+- Observe the full trace waterfall showing:
+  - `POST /api/v1/workflows/:id/submit` (HTTP Span)
+  - `db.query` (Child span tracking PostgreSQL execution latency & SQL statement)
+  - `kafka.produce` & downstream consumer spans.
+
+**CLI Inspection:**
+```bash
+curl -s "http://localhost:16686/api/traces?service=workflow-api&limit=1"
+```
+
+---
+
+### Scenario 6: Deep Health & Readiness Probes
+
+**Objective**: Verify that `/health/live` and `/health/ready` report true process and dependency health (PostgreSQL connection pool and Kafka cluster reachability).
+
+#### Method A: Test Liveness Probe (`/health/live`)
+```bash
+curl -s http://localhost:3000/health/live
+```
+**Expected Output:**
+```json
+{
+  "status": "ok",
+  "service": "workflow-api",
+  "timestamp": "2026-09-20T05:43:01.834Z",
+  "uptimeSeconds": 120
+}
+```
+
+#### Method B: Test Deep Readiness Probe (`/health/ready`)
+```bash
+curl -s http://localhost:3000/health/ready
+```
+**Expected Output:**
+```json
+{
+  "status": "ready",
+  "service": "workflow-api",
+  "checks": {
+    "database": "connected",
+    "kafka": "connected"
+  }
+}
+```
+
+---
+
+### Scenario 7: Prometheus Metrics, Alerts & Provisioned Grafana Dashboards
+
+**Objective**: Inspect PostgreSQL pool connection metrics, Outbox backlog gauges, and active Prometheus alerting rules.
+
+#### Method A: Query Prometheus Pool & Outbox Metrics
+```bash
+# Query active PostgreSQL pool connections
+curl -s "http://localhost:9090/api/v1/query?query=sum(pg_pool_active_connections)+by+(service)"
+
+# Query outbox backlog count
+curl -s "http://localhost:9090/api/v1/query?query=workflow_outbox_backlog_count"
+
+# Query Kafka DLQ messages
+curl -s "http://localhost:9090/api/v1/query?query=kafka_dlq_messages_total"
+```
+
+#### Method B: Open Provisioned Grafana Dashboards
+1. Navigate to Grafana at [http://localhost:3005](http://localhost:3005).
+2. Open **Dashboards** $\rightarrow$ **Workflow Platform - System Health & Business Performance**.
+3. View real-time graphs for HTTP throughput, DB Connection Pool Saturation, Outbox Lag, and DLQ Message Counts.
 
 ---
 

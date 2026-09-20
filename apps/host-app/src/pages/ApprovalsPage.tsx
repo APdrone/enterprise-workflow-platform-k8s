@@ -1,11 +1,14 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext.js';
+import { useSSE } from '../context/SSEContext.js';
 import { Workflow } from '@workflow/shared-types';
 import { WorkflowWidget } from '@workflow/workflow-widget';
+import { buildAuthHeaders, tracedFetch } from '../utils/api.js';
 import { CheckCircle2, Clock, RefreshCw, AlertCircle } from 'lucide-react';
 
 export const ApprovalsPage: React.FC = () => {
   const { tenantId, currentUser, apiUrl } = useAuth();
+  const { refreshSignal } = useSSE();
   const [pendingWorkflows, setPendingWorkflows] = useState<Workflow[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(null);
@@ -13,12 +16,8 @@ export const ApprovalsPage: React.FC = () => {
   const fetchPendingWorkflows = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${apiUrl}/api/v1/workflows?status=PENDING`, {
-        headers: {
-          'x-tenant-id': tenantId,
-          'x-user-id': currentUser.id,
-          'x-user-name': currentUser.name,
-        },
+      const res = await tracedFetch(`${apiUrl}/api/v1/workflows?status=PENDING`, {
+        headers: buildAuthHeaders(tenantId, currentUser),
       });
       const json = await res.json();
       if (json.success && json.data) {
@@ -39,7 +38,7 @@ export const ApprovalsPage: React.FC = () => {
 
   useEffect(() => {
     fetchPendingWorkflows();
-  }, [tenantId]);
+  }, [tenantId, refreshSignal]);
 
   return (
     <div>

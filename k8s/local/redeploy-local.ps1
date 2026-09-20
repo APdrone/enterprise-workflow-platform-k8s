@@ -40,13 +40,16 @@ if ($Target -eq "all" -or $Target -eq "services" -or $Target -eq "audit-service"
 }
 
 if ($imagesToLoad.Count -gt 0) {
-    Write-Host "`nImporting images into containerd..."
-    docker save -o ./k8s-redeploy.tar $imagesToLoad
-    docker cp ./k8s-redeploy.tar desktop-control-plane:/k8s-redeploy.tar
-    docker exec desktop-control-plane ctr -n k8s.io images import /k8s-redeploy.tar
-    docker exec desktop-control-plane rm /k8s-redeploy.tar
-    if (Test-Path ./k8s-redeploy.tar) {
-        Remove-Item ./k8s-redeploy.tar -Force
+    $kindNode = docker ps -q -f "name=desktop-control-plane"
+    if ($kindNode) {
+        Write-Host "`nImporting images into containerd..."
+        docker save -o ./k8s-redeploy.tar $imagesToLoad
+        docker cp ./k8s-redeploy.tar desktop-control-plane:/k8s-redeploy.tar
+        docker exec desktop-control-plane ctr -n k8s.io images import /k8s-redeploy.tar
+        docker exec desktop-control-plane rm /k8s-redeploy.tar
+        if (Test-Path ./k8s-redeploy.tar) {
+            Remove-Item ./k8s-redeploy.tar -Force
+        }
     }
 }
 

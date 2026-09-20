@@ -8,8 +8,9 @@ async function start() {
   const consumer = new NotificationConsumer();
   await consumer.start();
 
-  const server = await buildNotificationServer();
+  const server = await buildNotificationServer(consumer);
   await server.listen({ port: PORT, host: HOST });
+
   console.log(`[notification-service] Server running on http://${HOST}:${PORT}`);
 }
 
