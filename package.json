@@ -24,7 +24,9 @@
     "k8s:reload:ui": "powershell -ExecutionPolicy Bypass -File ./k8s/local/redeploy-local.ps1 -Target ui",
     "k8s:reload:api": "powershell -ExecutionPolicy Bypass -File ./k8s/local/redeploy-local.ps1 -Target api",
     "k8s:reset:data": "powershell -ExecutionPolicy Bypass -File ./k8s/local/reset-data.ps1",
-    "k8s:reset:hard": "powershell -ExecutionPolicy Bypass -File ./k8s/local/reset-data.ps1 -HardReset"
+    "k8s:reset:hard": "powershell -ExecutionPolicy Bypass -File ./k8s/local/reset-data.ps1 -HardReset",
+    "k8s:pause": "powershell -ExecutionPolicy Bypass -File ./k8s/local/pause-cluster.ps1",
+    "k8s:resume": "powershell -ExecutionPolicy Bypass -File ./k8s/local/resume-cluster.ps1"
   },
   "devDependencies": {
     "@playwright/test": "^1.49.1",

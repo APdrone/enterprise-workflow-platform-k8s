@@ -28,7 +28,11 @@ This document provides step-by-step instructions to run, develop, interact with,
    - [Unit, Contract & Integration Tests (Vitest)](#1-run-unit-contract--integration-tests-vitest)
    - [End-to-End Tests (Playwright)](#2-run-end-to-end-automated-tests-playwright)
    - [Performance & Load Tests (k6)](#3-run-performance--load-tests-k6)
-9. [Teardown & Cleanup](#-teardown--cleanup)
+9. [Cluster Lifecycle, Pausing & Teardown](#-cluster-lifecycle-pausing--teardown)
+   - [Option A: Pausing & Resuming the Cluster (Zero CPU/RAM, 100% Data Retention)](#option-a-pausing--resuming-the-cluster-zero-cpuram-100-data-retention)
+   - [Option B: Complete Teardown & Resource Deletion](#option-b-complete-teardown--resource-deletion)
+   - [Option C: Docker Compose Mode Teardown](#option-c-docker-compose-mode-teardown)
+   - [Option D: Destroy Local Kubernetes Cluster (Kind/k3d)](#option-d-destroy-local-kubernetes-cluster-kindk3d)
 
 ---
 
@@ -192,6 +196,27 @@ When you have created test expenses, approvals, and audit records and want to wi
   ```bash
   docker compose down -v   # Removes all volumes including postgres-data and kafka-data
   docker compose up -d
+  ```
+
+#### 6. Pausing & Resuming the Cluster (Zero CPU/RAM & Preserves Data)
+When turning off your laptop, stepping away, or running heavy Docker tasks for other projects, **you do NOT need to delete the cluster or lose your database records**:
+
+* **💤 Pause / Sleep Cluster (Frees 100% CPU and RAM)**:
+  Stops all port-forwards and scales all deployments and statefulsets to 0 replicas. All PostgreSQL PVC data and container images remain untouched:
+  ```bash
+  npm run k8s:pause
+  # OR
+  .\k8s\local\pause-cluster.ps1        # Windows PowerShell
+  ./k8s/local/pause-cluster.sh         # Linux / macOS / WSL
+  ```
+
+* **⚡ Resume Cluster (Instantly restore all services & port-forwards)**:
+  Scales PostgreSQL, Zookeeper, Kafka, backend microservices, monitoring, and frontend back up to full capacity, waits for readiness, and automatically restarts port-forwards:
+  ```bash
+  npm run k8s:resume
+  # OR
+  .\k8s\local\resume-cluster.ps1       # Windows PowerShell
+  ./k8s/local/resume-cluster.sh        # Linux / macOS / WSL
   ```
 
 ---
@@ -1074,24 +1099,67 @@ k6 run tests/perf/k6-workflow-load.js
 
 ---
 
-## 🧹 Teardown & Cleanup
+## 🧹 Cluster Lifecycle, Pausing & Teardown
 
-### Stop Kubernetes Deployment:
+### Option A: Pausing & Resuming the Cluster (Zero CPU/RAM, 100% Data Retention)
+> [!TIP]
+> **Recommended when stepping away, shutting down your laptop, or freeing resources for other Docker tasks.**
+> Scaling replicas to `0` terminates running containers so Docker Desktop and Kubernetes consume **0% CPU and 0MB RAM**, while keeping all PostgreSQL PersistentVolumes (`postgres-pvc`), database records, migrations, and local images completely intact.
+
+#### 1. Pause / Sleep Cluster:
+```bash
+# Via NPM script shortcut:
+npm run k8s:pause
+
+# OR via script directly:
+.\k8s\local\pause-cluster.ps1        # PowerShell (Windows)
+./k8s/local/pause-cluster.sh         # Bash (Linux / macOS / WSL)
+
+# OR via native kubectl:
+kubectl scale deployment --all -n workflow-platform --replicas=0
+kubectl scale statefulset --all -n workflow-platform --replicas=0
+```
+
+#### 2. Resume / Wake Cluster:
+```bash
+# Via NPM script shortcut:
+npm run k8s:resume
+
+# OR via script directly:
+.\k8s\local\resume-cluster.ps1       # PowerShell (Windows)
+./k8s/local/resume-cluster.sh        # Bash (Linux / macOS / WSL)
+```
+
+---
+
+### Option B: Complete Teardown & Resource Deletion
+Use this when you want to uninstall the Workflow Platform entirely from your Kubernetes cluster:
+
 ```bash
 # 1. Stop all background port-forward tunnels
 .\k8s\local\stop-port-forwards.ps1    # PowerShell (Windows)
-./k8s/local/stop-port-forwards.sh     # Bash (Linux/macOS)
+./k8s/local/stop-port-forwards.sh     # Bash (Linux / macOS / WSL)
 
-# 2. Delete all Kubernetes resources and namespace
+# 2. Delete all Kubernetes resources and namespace (or npm run k8s:down)
 kubectl delete -k k8s/
 ```
 
-### Stop Local Docker Compose:
+---
+
+### Option C: Docker Compose Mode Teardown
+If running in Docker Compose mode:
 ```bash
+# Stop and preserve database volumes:
+docker compose down
+
+# Stop and wipe all database and Kafka volumes:
 docker compose down -v
 ```
 
-### Destroy Local Kubernetes Cluster (if created with kind/k3d):
+---
+
+### Option D: Destroy Local Kubernetes Cluster (Kind/k3d)
+If you created a dedicated local cluster using Kind or k3d:
 ```bash
 # For Kind:
 kind delete cluster --name workflow-multi-node
