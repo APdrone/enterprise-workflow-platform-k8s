@@ -8,7 +8,7 @@ on:
 
 jobs:
   static-and-unit:
-    name: "Stage 1 & 2: Static Analysis, Unit & Outbox Tests"
+    name: "Stage 1 & 2: Static Analysis, Monorepo Typecheck & Unit/UI Tests"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -23,14 +23,14 @@ jobs:
       - name: Install Monorepo Dependencies
         run: npm ci
 
-      - name: Build & Typecheck Monorepo
-        run: npm run build
+      - name: Monorepo Typecheck
+        run: npm run typecheck
 
-      - name: Run Unit & Outbox Tests
-        run: npx vitest run tests/unit
+      - name: Run Unit & Frontend Component Tests
+        run: npm run test:unit
 
   contracts-and-security:
-    name: "Stage 3 & 4: Contract Schemas, Security Matrix & API Lifecycle"
+    name: "Stage 3 & 4: Contract Schemas, Security Matrix & Live RLS Integration"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -45,14 +45,14 @@ jobs:
       - name: Install Monorepo Dependencies
         run: npm ci
 
-      - name: Run Contract Tests
-        run: npx vitest run tests/contract
+      - name: Run Event, API & Pact Contract Tests
+        run: npm run test:contract && npm run test:pact
 
-      - name: Run Tenant Security & Integration Tests
-        run: npx vitest run tests/security tests/integration
+      - name: Run Tenant Security & DB RLS Integration Tests
+        run: npm run test:security && npm run test:integration
 
   e2e:
-    name: "Stage 5: Playwright End-to-End Tests"
+    name: "Stage 5: Playwright End-to-End User Journeys"
     runs-on: ubuntu-latest
     needs: [static-and-unit, contracts-and-security]
     steps:
@@ -82,4 +82,43 @@ jobs:
         with:
           name: playwright-report
           path: playwright-report/
+
+  pact-deploy-gate:
+    name: "Stage 6: Pact Can-I-Deploy Matrix & QA Deployment Gate"
+    runs-on: ubuntu-latest
+    needs: [contracts-and-security, e2e]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install Monorepo Dependencies
+        run: npm ci
+
+      - name: "Publish Pact Contracts to Broker"
+        run: npm run pact:publish
+        env:
+          PACT_BROKER_URL: ${{ secrets.PACT_BROKER_URL || 'http://localhost:9292' }}
+          PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
+          GIT_SHA: ${{ github.sha }}
+          GIT_BRANCH: ${{ github.ref_name }}
+
+      - name: "Evaluate Can-I-Deploy Gate (Target: QA Environment)"
+        run: npm run pact:can-i-deploy -- --pacticipant workflow-api --version ${{ github.sha }} --to-environment qa
+        env:
+          PACT_BROKER_URL: ${{ secrets.PACT_BROKER_URL || 'http://localhost:9292' }}
+          PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
+
+      - name: "Record Successful QA Deployment in Broker"
+        run: npm run pact:record-deployment -- --pacticipant workflow-api --version ${{ github.sha }} --environment qa
+        env:
+          PACT_BROKER_URL: ${{ secrets.PACT_BROKER_URL || 'http://localhost:9292' }}
+          PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
+
 

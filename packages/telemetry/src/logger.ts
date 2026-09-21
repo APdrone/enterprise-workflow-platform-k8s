@@ -36,11 +36,12 @@ const LOG_LEVEL_PRIORITIES: Record<LogLevel, number> = {
 };
 
 export class StructuredLogger {
-  private serviceName: string;
-  private defaultContext: LogContext;
-  private minLevel: LogLevel;
+  protected serviceName: string;
+  protected defaultContext: LogContext;
+  protected minLevel: LogLevel;
 
   constructor(serviceName: string, defaultContext: LogContext = {}, minLevel?: LogLevel) {
+
     this.serviceName = serviceName;
     this.defaultContext = defaultContext;
     const envLevel = (process.env.LOG_LEVEL?.toLowerCase() as LogLevel) || 'info';

@@ -205,93 +205,61 @@ PostgreSQL 16 managed with **Drizzle ORM** (Port `5433` / Database `workflow_db`
 │   ├── 07-host-app.yaml        # Host React App NGINX Deployment & Service
 │   ├── 08-observability.yaml   # Jaeger Tracing, Prometheus Server & Kafka UI
 │   └── local/                  # Local cluster setup, fast hot-reloads & port-forwards
-├── tests/                      # Automated test suite (95 tests across 19 suites: Unit, Pact, Integration, RLS Security, Observability)
+├── tests/                      # Automated test suite (130+ tests across 28 suites: Unit, React Component, Pact, RLS Security, Integration, E2E)
 ├── docker-compose.yml          # Local Docker Compose multi-container stack
-└── playwright.config.ts        # Playwright E2E browser test configuration
+├── playwright.config.ts        # Playwright E2E browser test configuration
+└── pacts/                      # Generated Pact Consumer-Driven Contract JSON specifications
 ```
 
 ---
 
-## 📚 Documentation Sitemap
+## 🧪 Automated Testing Pyramid & CI/CD Pipelines
 
-All comprehensive guides, runbooks, and deep-dive technical documents are organized inside the [`docs/`](./docs) directory:
+The platform implements an **8-Layer Quality Engineering & Testing Pyramid** integrated with **GitHub Actions CI/CD pipelines** for developer fast feedback and release gatekeeping:
 
-| Document | Purpose |
-|---|---|
-| 🌟 **[Feature Catalog & Capabilities](./docs/FEATURES.md)** | Exhaustive breakdown of all platform features: SSE live sync, Kafka DLQ resilience, dynamic rules & parallel quorums, PostgreSQL RLS, state machines, and resilience patterns. |
-| 🗺️ **[System Architecture & Tracing](./docs/ARCHITECTURE.md)** | Visual sequence diagrams, multi-tier state machine flows, CloudEvents schemas, and W3C context propagation. |
-| 🚀 **[Execution & Testing Runbook](./docs/RUN_GUIDE.md)** | Step-by-step commands to run the platform, manual UI testing ($120k expense), negative test cases, and outbox chaos experiments. |
-| 🧪 **[Testing Strategy & Pyramid](./docs/TESTING_STRATEGY.md)** | Test pyramid breakdown (Vitest unit tests, Pact contract verification, Playwright E2E tests, k6 load tests). |
-| 🌐 **[Kubernetes Deployment Guide](./docs/KUBERNETES_DEPLOYMENT.md)** | Kubernetes manifests, Kind/k3d multi-node clusters, rolling restarts, and fault-tolerance guides. |
-| 🛠️ **[Developer Overview](./docs/DEVELOPMENT.md)** | Platform overview, microservices boundaries, domain model, and architectural principles. |
-| ❓ **[Architecture & Troubleshooting FAQ](./docs/FAQ.md)** | Frequently asked questions regarding Outbox Relay mechanics, broker recovery, and failure modes. |
-
----
-
-## ⚡ Quick Start
-
-### Prerequisites
-- [Node.js](https://nodejs.org/) (v20+ or v22+)
-- [Docker Desktop](https://www.docker.com/) (with Kubernetes enabled) or [k3d](https://k3d.io/) / [Kind](https://kind.sigs.k8s.io/)
-- [kubectl](https://kubernetes.io/docs/tasks/tools/)
-
-### 1. Install Dependencies & Build Packages
-```bash
-npm install
-npm run build
+```
+                              ▲
+                             / \     Tier 8: Performance SLAs (k6 - P95 < 200ms)
+                            /   \    Tier 7: End-to-End User Journeys (Playwright Browser)
+                           /     \   Tier 6: Service Integration & Live RLS (Testcontainers)
+                          /       \  Tier 5: Tenant Security Matrix & Token Tampering (Vitest)
+                         /         \ Tier 4: Consumer-Driven Contracts (Pact V3 & MessagePact)
+                        /           \Tier 3: Frontend Component & Hook Suite (React Testing Lib + JSDOM)
+                       /             \Tier 2: Microservice Unit Logic & Outbox State Machine (Vitest)
+                      /_______________\Tier 1: Static Type Safety & Compilation (TypeScript Strict)
 ```
 
-### 2. Deploy to Kubernetes (1-Click)
-```powershell
-# Deploy all microservices, Kafka, Postgres, Jaeger, and Prometheus
-powershell -ExecutionPolicy Bypass -File ./k8s/local/deploy-local.ps1
-```
+### 🏃 Developer Commands & Fast Feedback Loop
 
-### 3. Start Port-Forward Tunnels
-```powershell
-powershell -ExecutionPolicy Bypass -File ./k8s/local/start-port-forwards.ps1
-```
-
----
-
-## 🌐 Active Service Endpoints
-
-| Component / Tool | Port (Local / K8s) | Working URL | Description |
+| Command | Purpose | Speed | When to Run |
 |---|---|---|---|
-| **Host Application (React + Vite)** | `8080` / `5173` | [http://localhost:8080](http://localhost:8080) | Main UI: Real-Time SSE Sync, Expenses, Parallel Approvals, Audit Log & W3C Tracing |
-| **Workflow API** | `3000` | [http://localhost:3000/ready](http://localhost:3000/ready) | Fastify REST API, State Machine, Dynamic Rules (`/api/v1/rules`) & Outbox Relay |
-| **Notification Service** | `3001` | [http://localhost:3001/health](http://localhost:3001/health) | Kafka consumer, notifications API & SSE Stream (`/api/v1/stream`) |
-| **Audit Service** | `3002` | [http://localhost:3002/health](http://localhost:3002/health) | Kafka consumer, immutable audit ledger & DLQ Replay API (`/api/v1/dlq/messages`) |
-| **Grafana Dashboards** | `3005` | [http://localhost:3005](http://localhost:3005) | Provisioned Dashboards: System Health, DB Pool & Outbox Reliability |
-| **Kafka Web UI** | `8085` | [http://localhost:8085](http://localhost:8085) | Real-time topic inspector, DLQ monitor & consumer group lag viewer |
-| **Jaeger Distributed Tracing** | `16686` | [http://localhost:16686](http://localhost:16686) | End-to-end distributed trace explorer (OTLP on `:4318`) with DB Query Spans |
-| **Prometheus Server** | `9090` | [http://localhost:9090](http://localhost:9090) | Prometheus metrics scraper, alerting rules & query interface |
-| **PostgreSQL Database** | `5433` | `localhost:5433` | Databases: `workflow_db`, `audit_db` (RLS Enforced, User: `postgres`, Pass: `postgres`) |
+| `npm run check:fast` | Monorepo Typecheck + Unit + React Component tests | **~3s** | Before every commit |
+| `npm run check:all` | Typecheck + Unit + Contract + Pact + Security tests | **~8s** | Before opening a PR |
+| `npm run test:watch` | Vitest interactive live test runner | **Instant** | During active feature development |
+| `npm test` | Runs all 28 automated test suites | **~9s** | Full workspace validation |
+| `npm run test:unit` | Service state machines, rules engine & outbox relay tests | **~1s** | Backend logic iteration |
+| `npm run test:contract` | Live Fastify routes & CloudEvents 1.0 schema tests | **~1s** | API & event schema changes |
+| `npm run test:pact` | Generates & verifies HTTP & Kafka MessagePact contracts | **~3s** | Cross-service contract verification |
+| `npm run pact:can-i-deploy` | Queries Pact Broker matrix (`dev` / `qa` / `prod`) | **~1s** | Deployment compatibility check |
+| `npm run test:security` | Tenant isolation & PostgreSQL RLS kernel policy tests | **~1s** | Security & multi-tenant changes |
+| `npm run test:e2e` | Playwright browser user journey tests | **~15s** | Full frontend-to-backend journeys |
+| `npm run test:perf` | k6 load test script enforcing P95 SLA thresholds | **~50s** | Performance benchmarking |
 
 ---
 
-## ⚡ Fast Hot-Reload & Redeployment Shortcuts
+### 🔄 CI/CD Pipeline Architecture
 
-| Command / Shortcut | Target | Duration | Description |
-|---|---|---|---|
-| `npm run k8s:reload:ui` | Frontend (`host-app`) | **~3 seconds** | Syncs compiled Vite bundle directly into running NGINX pods via `kubectl cp` with zero downtime. |
-| `npm run k8s:reload:api` | Backend (`workflow-api`) | **~15 seconds** | Rebuilds TypeScript backend, loads into containerd, and triggers rolling restart. |
-| `npm run k8s:reload` | Full Cluster | **~45 seconds** | Rebuilds all services (`host-app`, `workflow-api`, `notification-service`, `audit-service`). |
-| `npm run k8s:reset:data` | Fast Data Wipe | **~1 second** | Truncates all PostgreSQL tables and purges the Kafka topic for a clean test run. |
+```
+1. Developer PR Pipeline (.github/workflows/dev-pr.yml) — Trigger: Pull Requests & feature branches
+   ├── Stage 1: Fast Static Analysis, Typecheck & Unit/UI Tests (< 1 min)
+   └── Stage 2: Contract Schemas, Pact CDCT, Security Matrix & Dev Can-I-Deploy Gate
+   🛑 FAILS FAST & BLOCKS PR MERGE IF ANY TEST FAILS
 
----
-
-## 🧪 Automated Test Suite
-
-```bash
-# Run all unit and integration tests across workspaces
-npm test
-
-# Run contract compatibility tests (Pact / Schema Validation)
-npm run test:pact
-
-# Run end-to-end browser tests
-npm run test:e2e
+2. QA & Release Pipeline (.github/workflows/ci.yml) — Trigger: Push / Merge to 'main'
+   ├── Stage 1 & 2: Static Analysis, Monorepo Typecheck & Unit Tests
+   ├── Stage 3 & 4: Contract Schemas, Security Matrix & Live RLS Integration
+   ├── Stage 5: Playwright End-to-End User Journeys (Multi-tenant isolation & multi-tier routing)
+   └── Stage 6: Pact Can-I-Deploy QA Gate, Contract Publishing & Deployment Recording
 ```
 
 ---

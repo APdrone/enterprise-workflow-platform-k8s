@@ -1303,73 +1303,120 @@ GitHub Push / PR
 
 ### GitHub Actions Workflow
 
-```yaml
-# .github/workflows/test.yml
-name: Test Pipeline
+```
+1. Developer PR Pipeline (.github/workflows/dev-pr.yml) — Trigger: Pull Requests & feature branches
+   ├── Stage 1: Fast Static Analysis, Typecheck & Unit/UI Tests (< 1 min)
+   └── Stage 2: Contract Schemas, Pact CDCT, Security Matrix & Dev Can-I-Deploy Gate
+   🛑 FAILS FAST & BLOCKS PR MERGE IF ANY TEST FAILS
 
-on: [push, pull_request]
+2. QA & Release Pipeline (.github/workflows/ci.yml) — Trigger: Push / Merge to 'main'
+   ├── Stage 1 & 2: Static Analysis, Monorepo Typecheck & Unit Tests
+   ├── Stage 3 & 4: Contract Schemas, Security Matrix & Live RLS Integration
+   ├── Stage 5: Playwright End-to-End User Journeys (Multi-tenant isolation & multi-tier routing)
+   └── Stage 6: Pact Can-I-Deploy QA Gate, Contract Publishing & Deployment Recording
+```
+
+### GitHub Actions Workflows
+
+#### 1. Developer PR Pipeline (`.github/workflows/dev-pr.yml`)
+```yaml
+name: "Developer PR & Branch Verification (Fail-Fast)"
+
+on:
+  pull_request:
+    branches: [main, master, develop]
+  push:
+    branches: ['feat/**', 'fix/**', 'dev', 'develop']
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  fast-feedback:
+  fast-checks:
+    name: "1. Typecheck, Unit & Frontend Component Tests"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: '22', cache: 'npm' }
+        with: { node-version: 22, cache: 'npm' }
       - run: npm ci
-      - run: npx tsc --noEmit
-      - run: npx eslint 'tests/**/*.ts'
-      - run: npx vitest run --coverage
+      - run: npm run check:fast
 
-  contract-tests:
-    needs: fast-feedback
+  contracts-and-security:
+    name: "2. API, Event, Pact & Security Matrix"
     runs-on: ubuntu-latest
+    needs: [fast-checks]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: '22', cache: 'npm' }
+        with: { node-version: 22, cache: 'npm' }
       - run: npm ci
-      - run: npx vitest run tests/contracts
+      - run: npm run test:contract
+      - run: npm run test:pact
+      - run: npm run test:security
+      - run: npm run pact:can-i-deploy -- --pacticipant workflow-api --version ${{ github.sha }} --to-environment dev
         env:
-          PACT_BROKER_URL: ${{ secrets.PACT_BROKER_URL }}
+          PACT_BROKER_URL: ${{ secrets.PACT_BROKER_URL || 'http://localhost:9292' }}
           PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
+```
 
-  integration-tests:
-    needs: fast-feedback
+#### 2. QA & Release Pipeline (`.github/workflows/ci.yml`)
+```yaml
+name: Workflow Platform Enterprise CI
+
+on:
+  push:
+    branches: [main, master]
+
+jobs:
+  static-and-unit:
+    name: "Stage 1 & 2: Static Analysis, Monorepo Typecheck & Unit/UI Tests"
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env: { POSTGRES_PASSWORD: test }
-      kafka:
-        image: confluentinc/cp-kafka:7.6.0
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: '22', cache: 'npm' }
+        with: { node-version: 22, cache: 'npm' }
       - run: npm ci
-      - run: npx vitest run tests/integration
-        env:
-          API_BASE_URL: http://localhost:8080
+      - run: npm run typecheck
+      - run: npm run test:unit
 
-  e2e-tests:
-    needs: integration-tests
+  contracts-and-security:
+    name: "Stage 3 & 4: Contract Schemas, Security Matrix & Live RLS Integration"
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: '22', cache: 'npm' }
+        with: { node-version: 22, cache: 'npm' }
       - run: npm ci
-      - run: npx playwright install --with-deps
-      - run: npx playwright test tests/e2e
-        env:
-          BASE_URL: ${{ secrets.STAGING_URL }}
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: playwright-report
-          path: playwright-report/
+      - run: npm run test:contract && npm run test:pact
+      - run: npm run test:security && npm run test:integration
+
+  e2e:
+    name: "Stage 5: Playwright End-to-End User Journeys"
+    runs-on: ubuntu-latest
+    needs: [static-and-unit, contracts-and-security]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: 'npm' }
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+        env: { CI: true }
+
+  pact-deploy-gate:
+    name: "Stage 6: Pact Can-I-Deploy Matrix & QA Deployment Gate"
+    runs-on: ubuntu-latest
+    needs: [contracts-and-security, e2e]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: 'npm' }
+      - run: npm ci
+      - run: npm run pact:publish
+      - run: npm run pact:can-i-deploy -- --pacticipant workflow-api --version ${{ github.sha }} --to-environment qa
+      - run: npm run pact:record-deployment -- --pacticipant workflow-api --version ${{ github.sha }} --environment qa
 ```
 
 ---

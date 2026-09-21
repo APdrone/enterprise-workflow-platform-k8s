@@ -1,13 +1,49 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { RulesEngineService } from '../../services/workflow-api/src/services/rules.engine.js';
 import { CreateWorkflowDTO } from '@workflow/shared-types';
+import { db } from '../../services/workflow-api/src/db/client.js';
+
+vi.mock('../../services/workflow-api/src/db/client.js', () => {
+  const createChain = (result: any = []) => {
+    const chain: any = {
+      from: vi.fn(),
+      where: vi.fn(),
+      orderBy: vi.fn(),
+      limit: vi.fn(),
+      offset: vi.fn(),
+      values: vi.fn().mockResolvedValue(undefined),
+      set: vi.fn(),
+      returning: vi.fn().mockResolvedValue(result),
+      then: (resolve: any, reject?: any) => Promise.resolve(result).then(resolve, reject),
+      catch: (reject: any) => Promise.resolve(result).catch(reject),
+    };
+    chain.from.mockReturnValue(chain);
+    chain.where.mockReturnValue(chain);
+    chain.orderBy.mockReturnValue(chain);
+    chain.limit.mockReturnValue(chain);
+    chain.offset.mockReturnValue(chain);
+    chain.set.mockReturnValue(chain);
+    return chain;
+  };
+
+  return {
+    db: {
+      select: vi.fn(() => createChain([])),
+      insert: vi.fn(() => createChain()),
+      update: vi.fn(() => createChain()),
+    },
+    pool: { end: vi.fn() },
+  };
+});
 
 describe('RulesEngineService Unit Tests', () => {
   let rulesEngine: RulesEngineService;
 
   beforeEach(() => {
     rulesEngine = new RulesEngineService();
+    vi.clearAllMocks();
   });
+
 
   describe('Default Tier Step Generation', () => {
     it('should generate single Team Lead step for low amount (< 10000)', async () => {
@@ -97,4 +133,50 @@ describe('RulesEngineService Unit Tests', () => {
       expect(steps[2].stepOrder).toBe(2);
     });
   });
+
+  describe('Tenant-Scoped Dynamic Database Rules Evaluation', () => {
+    it('should evaluate custom dynamic rule configured in database when conditions match', async () => {
+      const mockRule = {
+        id: 'rule-custom-99',
+        tenantId: 'tenant-corp-a',
+        ruleName: 'Engineering High-Cost Software',
+        workflowType: 'PURCHASE_ORDER',
+        minAmount: '5000',
+        maxAmount: '50000',
+        department: 'Engineering',
+        priority: 10,
+        isActive: true,
+        steps: [
+          { stepOrder: 1, stepRole: 'ENG_ARCHITECT', policy: 'ALL_MUST_APPROVE' },
+          { stepOrder: 2, stepRole: 'CTO', policy: 'ALL_MUST_APPROVE' },
+        ],
+      };
+
+      const chain: any = {
+        from: vi.fn(),
+        where: vi.fn(),
+        orderBy: vi.fn().mockResolvedValue([mockRule]),
+      };
+      chain.from.mockReturnValue(chain);
+      chain.where.mockReturnValue(chain);
+
+      vi.spyOn(db, 'select').mockReturnValue(chain);
+
+      const dto: CreateWorkflowDTO = {
+        type: 'PURCHASE_ORDER',
+        title: 'Datadog Enterprise License',
+        amount: 15000,
+        department: 'Engineering',
+      };
+
+
+      const steps = await rulesEngine.evaluateSteps('tenant-corp-a', 'wf-dyn-1', dto);
+      expect(steps.length).toBe(2);
+      expect(steps[0].stepRole).toBe('ENG_ARCHITECT');
+      expect(steps[0].stepOrder).toBe(1);
+      expect(steps[1].stepRole).toBe('CTO');
+      expect(steps[1].stepOrder).toBe(2);
+    });
+  });
 });
+

@@ -1,0 +1,67 @@
+name: "Developer PR & Branch Verification (Fail-Fast)"
+
+on:
+  pull_request:
+    branches: [main, master, develop]
+  push:
+    branches:
+      - 'feat/**'
+      - 'fix/**'
+      - 'dev'
+      - 'develop'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fast-checks:
+    name: "1. Typecheck, Unit & Frontend Component Tests"
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Checkout Code"
+        uses: actions/checkout@v4
+
+      - name: "Setup Node.js 22"
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: "Install Monorepo Dependencies"
+        run: npm ci
+
+      - name: "Run Fast Typecheck & Unit Suite"
+        run: npm run check:fast
+
+  contracts-and-security:
+    name: "2. API, Event, Pact & Security Matrix"
+    runs-on: ubuntu-latest
+    needs: [fast-checks]
+    steps:
+      - name: "Checkout Code"
+        uses: actions/checkout@v4
+
+      - name: "Setup Node.js 22"
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: "Install Monorepo Dependencies"
+        run: npm ci
+
+      - name: "Run Event & API Contract Tests"
+        run: npm run test:contract
+
+      - name: "Run Pact Consumer & Provider Contracts"
+        run: npm run test:pact
+
+      - name: "Run Tenant Security Matrix"
+        run: npm run test:security
+
+      - name: "Evaluate Dev Can-I-Deploy Gate"
+        run: npm run pact:can-i-deploy -- --pacticipant workflow-api --version ${{ github.sha }} --to-environment dev
+        env:
+          PACT_BROKER_URL: ${{ secrets.PACT_BROKER_URL || 'http://localhost:9292' }}
+          PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}

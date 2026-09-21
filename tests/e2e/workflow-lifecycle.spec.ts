@@ -87,4 +87,82 @@ test.describe('Workflow Platform End-to-End User Journeys', () => {
     const timeline = page.getByTestId('audit-timeline');
     await expect(timeline).toBeVisible({ timeout: 5000 });
   });
+
+  test('Rejection Flow: Create Draft -> Submit -> Approver Rejects with Mandatory Reason', async ({
+    page,
+  }) => {
+    await page.goto('/expenses');
+    await page.waitForLoadState('networkidle');
+
+    // 1. Create and submit an expense as Alice
+    await page.getByTestId('tenant-selector').selectOption('tenant-corp-a');
+    await page.getByTestId('user-selector').selectOption('user-alice');
+
+    const expenseTitle = `Over-budget Event Catering - ${Date.now()}`;
+    await page.getByTestId('new-expense-btn').click();
+    await page.getByTestId('expense-title-input').fill(expenseTitle);
+    await page.getByTestId('expense-amount-input').fill('9500');
+    await page.getByTestId('expense-desc-input').fill('Company social event dinner and drinks');
+    await page.getByTestId('submit-create-btn').click();
+
+    // Select and submit
+    await page.getByText(expenseTitle).click();
+    await page.getByTestId('submit-workflow-btn').click();
+    await expect(page.getByTestId('workflow-status-badge')).toHaveText(/Pending/i, { timeout: 5000 });
+
+    // 2. Switch to Approver (Bob Smith)
+    await page.getByTestId('user-selector').selectOption('user-bob');
+    await page.getByTestId('nav-approvals-link').click();
+    await page.getByText(expenseTitle).click();
+
+    // 3. Open Rejection Modal
+    const rejectBtn = page.getByTestId('reject-workflow-btn');
+    await expect(rejectBtn).toBeVisible();
+    await rejectBtn.click();
+
+    // Verify modal appears and requires reason
+    const reasonInput = page.getByTestId('rejection-reason-input');
+    await expect(reasonInput).toBeVisible();
+
+    const confirmRejectBtn = page.getByTestId('reject-confirm-btn');
+    await expect(confirmRejectBtn).toBeDisabled();
+
+    // Fill reason and submit rejection
+    const rejectionReason = 'Exceeds team quarterly entertainment budget ceiling ($5,000 max)';
+    await reasonInput.fill(rejectionReason);
+    await expect(confirmRejectBtn).not.toBeDisabled();
+    await confirmRejectBtn.click();
+
+    // 4. Verify Terminal Status is REJECTED
+    await expect(page.getByTestId('workflow-status-badge')).toHaveText(/Rejected/i, { timeout: 5000 });
+    await expect(page.getByText(rejectionReason)).toBeVisible();
+  });
+
+  test('High-Value Multi-Tier Routing: Expense over $10,000 requires multiple approval steps', async ({
+    page,
+  }) => {
+    await page.goto('/expenses');
+    await page.waitForLoadState('networkidle');
+
+    await page.getByTestId('tenant-selector').selectOption('tenant-corp-a');
+    await page.getByTestId('user-selector').selectOption('user-alice');
+
+    // Create high-tier expense ($45,000 -> triggers Tier 2 Team Lead + Dept Manager)
+    const expenseTitle = `Core Switch Infrastructure - ${Date.now()}`;
+    await page.getByTestId('new-expense-btn').click();
+    await page.getByTestId('expense-title-input').fill(expenseTitle);
+    await page.getByTestId('expense-amount-input').fill('45000');
+    await page.getByTestId('expense-desc-input').fill('Cisco core datacenter switch upgrade');
+    await page.getByTestId('submit-create-btn').click();
+
+    // Submit
+    await page.getByText(expenseTitle).click();
+    await page.getByTestId('submit-workflow-btn').click();
+    await expect(page.getByTestId('workflow-status-badge')).toHaveText(/Pending/i, { timeout: 5000 });
+
+    // Verify Stepper shows multi-level hierarchy
+    const stepper = page.getByTestId('workflow-stepper-container');
+    await expect(stepper).toBeVisible();
+    await expect(stepper).toContainText(/Approval Hierarchy/i);
+  });
 });

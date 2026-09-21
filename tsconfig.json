@@ -1,0 +1,25 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@workflow/telemetry/client": ["packages/telemetry/src/client.ts"],
+      "@workflow/telemetry": ["packages/telemetry/src/index.ts"],
+      "@workflow/shared-types": ["packages/shared-types/src/index.ts"],
+      "@workflow/shared-schemas": ["packages/shared-schemas/src/index.ts"],
+      "@workflow/test-utils": ["packages/test-utils/src/index.ts"]
+    }
+  },
+
+  "include": [
+    "tests/**/*",
+    "packages/*/src/**/*",
+    "services/*/src/**/*"
+  ],
+  "exclude": [
+    "**/node_modules/**",
+    "**/dist/**"
+  ]
+}
+

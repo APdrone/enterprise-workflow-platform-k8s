@@ -12,13 +12,22 @@ export function buildWorkflowEvent(
 
   let previousStatus = dataOverrides.previousStatus || 'DRAFT';
   let currentStatus = dataOverrides.currentStatus || 'PENDING';
+  let currentStepOrder = dataOverrides.currentStepOrder;
+  let totalSteps = dataOverrides.totalSteps;
+  let rejectionReason = dataOverrides.rejectionReason;
 
-  if (type === 'workflow.approved.v1') {
+  if (type === 'workflow.step_approved.v1') {
+    previousStatus = 'PENDING';
+    currentStatus = 'PENDING';
+    currentStepOrder = dataOverrides.currentStepOrder ?? 1;
+    totalSteps = dataOverrides.totalSteps ?? 2;
+  } else if (type === 'workflow.approved.v1') {
     previousStatus = 'PENDING';
     currentStatus = 'APPROVED';
   } else if (type === 'workflow.rejected.v1') {
     previousStatus = 'PENDING';
     currentStatus = 'REJECTED';
+    rejectionReason = dataOverrides.rejectionReason ?? 'Standard policy rejection by reviewer';
   } else if (type === 'workflow.cancelled.v1') {
     previousStatus = dataOverrides.previousStatus || 'PENDING';
     currentStatus = 'CANCELLED';
@@ -36,9 +45,13 @@ export function buildWorkflowEvent(
     actorId: 'user-emp-1',
     previousStatus,
     currentStatus,
+    currentStepOrder,
+    totalSteps,
+    rejectionReason,
     timestamp: now,
     ...dataOverrides,
   };
+
 
   return {
     id: uuidv4(),

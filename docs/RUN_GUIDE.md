@@ -1071,31 +1071,75 @@ curl -s "http://localhost:9090/api/v1/query?query=kafka_dlq_messages_total"
 
 ## 🧪 Automated Testing Guide
 
-### 1. Run Unit, Contract & Integration Tests (Vitest)
-Executes multi-step state machine unit tests, transactional outbox tests, CloudEvent schema compatibility tests, and consumer idempotency tests:
+The platform features an **8-Layer Quality Engineering Testing Pyramid** with over 130+ automated tests across 28 test suites.
+
+### 1. Developer Fast Feedback Loop
 ```bash
-npm run test
+# ⚡ Fast Pre-Commit Check (< 3s): Typecheck + Unit + React Component tests
+npm run check:fast
+
+# 🔍 Pre-Push Full Check (~8s): Typecheck + Unit + Contract + Pact + Security
+npm run check:all
+
+# 🔄 Interactive Vitest Watch Mode (hot-reloads on file changes)
+npm run test:watch
 ```
 
-### 2. Run End-to-End Automated Tests (Playwright)
-Executes multi-tenant isolation tests and complete end-to-end workflow lifecycle journeys:
+### 2. Granular Test Suites (Vitest)
+```bash
+# Run all automated test suites across the monorepo
+npm test
+
+# Run microservice unit tests only (state machine, rules engine, outbox, SSE)
+npm run test:unit
+
+# Run REST API & Kafka CloudEvents contract tests
+npm run test:contract
+
+# Run Consumer-Driven Pact contract tests (HTTP & MessagePact)
+npm run test:pact
+
+# Run Pact Can-I-Deploy matrix gate check
+npm run pact:can-i-deploy -- --pacticipant workflow-api --version 1.0.0 --to-environment dev
+
+# Run PostgreSQL Row-Level Security & Tenant Isolation tests
+npm run test:security
+
+# Run integration tests (Testcontainers PostgreSQL RLS & Outbox loop)
+npm run test:integration
+```
+
+### 3. End-to-End Automated Tests (Playwright)
+Executes multi-tenant isolation tests and complete end-to-end workflow lifecycle journeys in real browsers:
 ```bash
 # First time setup (if Playwright browsers not installed):
 npx playwright install chromium
 
-# Run E2E tests:
+# Run headless E2E tests:
 npm run test:e2e
-```
-To run tests interactively with UI mode:
-```bash
+
+# Run interactively with Playwright UI:
 npx playwright test --ui
 ```
 
-### 3. Run Performance & Load Tests (k6)
-Simulates concurrent users creating, submitting, and listing workflows:
+### 4. Performance & Load Tests (k6)
+Simulates concurrent users creating, submitting, and listing workflows while enforcing strict SLA thresholds (`P95 < 200ms`, `Error Rate < 1%`):
 ```bash
-k6 run tests/perf/k6-workflow-load.js
+npm run test:perf
 ```
+
+---
+
+### 🔄 CI/CD Pipelines Overview
+
+1. **Developer PR Pipeline (`.github/workflows/dev-pr.yml`)**:
+   - Runs automatically on Pull Requests and feature branches (`feat/**`, `fix/**`).
+   - Executes `check:fast` ➔ `contracts-and-security` ➔ `pact:can-i-deploy --to-environment dev`.
+   - **Fails fast & blocks PR merge** if any test fails.
+
+2. **QA & Release Pipeline (`.github/workflows/ci.yml`)**:
+   - Runs on merges to `main` / `master`.
+   - Executes all test layers ➔ Playwright E2E ➔ `pact:can-i-deploy --to-environment qa` ➔ QA deployment record.
 
 ---
 
