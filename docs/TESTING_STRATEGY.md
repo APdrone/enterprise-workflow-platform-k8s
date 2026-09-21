@@ -1437,6 +1437,7 @@ Tests alone are not enough — you need to correlate test failures with what's h
 | `structured-logger.test.ts` | Unit tests for `StructuredLogger` | Verifies ISO 8601 timestamps, log levels (`info`, `warn`, `error`), JSON formatting, `trace_id`, `span_id`, `tenant_id`, and `workflow_id` inclusion. |
 | `db-query-spans.test.ts` | Unit tests for Drizzle / PostgreSQL OpenTelemetry spans | Verifies `AsyncLocalStorage` context propagation, child span creation (`db.query`), SQL query attributes, latency timing, and exception handling. |
 | `client-tracing.test.ts` | Unit tests for Frontend W3C client | Verifies `generateTraceparent()` (32-hex trace ID, 16-hex span ID, `00-...-01`), `generateCorrelationId()`, `createTracedHeaders()`, and `tracedFetch()`. |
+| `trace-waterfall.integration.test.ts` | Integration tests for Distributed Trace Waterfall | Validates end-to-end W3C `traceparent` propagation from Fastify Gateway ➔ Outbox ➔ Kafka ➔ Audit & Notification Consumers with matching root `traceId`. |
 | `health-readiness-probes.test.ts` | Unit tests for Deep Health & Readiness Probes | Verifies `/health/live` (process uptime & memory) and `/health/ready` (PostgreSQL `SELECT 1` & Kafka cluster connectivity). |
 | `observability-configs.test.ts` | Configuration tests for Prometheus & Grafana | Validates Prometheus production alerting rules syntax and provisioned Grafana dashboard definitions. |
 
@@ -1503,11 +1504,13 @@ describe('Workflow API', () => {
 |---|---|---|
 | **Test Runner** | **Vitest** | Native TypeScript support, fast, compatible with ESM, good coverage tooling |
 | **E2E Browser Tests** | **Playwright** | Explicitly mentioned in JD; multi-browser, stable, great for embedded components |
+| **Accessibility (a11y)** | **@axe-core/playwright** | Automated WCAG 2.1 AA audits across host app, widget, and modal dialogs |
 | **API Contract Tests** | **Pact JS** | Industry standard for Consumer-Driven Contract Testing; has broker for multi-team usage |
 | **Kafka Event Tests** | **Pact JS (MessagePact) + kafkajs** | Same contract framework extended to async messages |
-| **Integration HTTP Testing** | **Supertest** | Lightweight, pairs naturally with Vitest, great for API integration testing |
+| **Kafka Partitioning** | **Murmur2 Hashing Algorithm** | Strict partition routing guarantee (`${tenantId}:${workflowId}`) for in-order delivery |
+| **Integration HTTP Testing** | **Supertest / Fastify .inject()** | Lightweight, pairs naturally with Vitest, great for API integration testing |
 | **Real Services in Tests** | **Testcontainers** | Spins up real Postgres/Kafka/Redis in Docker — no mocking needed |
-| **Performance / Load** | **k6** | JavaScript-based scripts, excellent Kubernetes/cloud integrations, Grafana native |
+| **Performance / Load** | **k6** | Multi-scenario load scripts, noisy-neighbor flood testing, Grafana native |
 | **Static Analysis** | **TypeScript + ESLint** | Catches type/contract mismatches in test code before runtime |
 | **Test Data** | **@faker-js/faker** | Realistic data generation; avoids hardcoded values |
 | **CI Pipeline** | **GitHub Actions + CircleCI** | Both mentioned in JD; GHA for PR feedback, CircleCI for heavier test stages |
@@ -1519,19 +1522,19 @@ describe('Workflow API', () => {
 
 Based on the JD responsibilities and platform architecture:
 
-| Risk | Severity | Test Layer | Tool | Frequency |
+| Risk | Severity | Test Layer | Tool / Test Suite | Frequency |
 |---|---|---|---|---|
-| Tenant data leakage | 🔴 Critical | Integration + Security | Supertest | Every PR |
-| Kafka schema breaking change | 🔴 Critical | Event Contract | Pact MessagePact | Every PR |
-| API contract broken for consumer | 🔴 Critical | API Contract | Pact | Every PR |
-| Event ordering failure | 🔴 Critical | Integration | kafkajs + Vitest | Every PR |
-| Performance degradation at scale | 🟠 High | Performance | k6 | Every release |
-| Partial failure / inconsistent state | 🟠 High | Integration | Supertest + Vitest | Every PR |
-| Micro-frontend widget breaks in host | 🟠 High | E2E | Playwright | Every PR (staging) |
-| Retry storm / infinite loop | 🟠 High | Performance | k6 | Every release |
-| Approval routing wrong approver | 🟡 Medium | Integration + E2E | Supertest + Playwright | Every PR |
-| Missing audit log entry | 🟡 Medium | Integration | Supertest | Every PR |
-| CI pipeline flakiness | 🟡 Medium | All layers | Vitest retries | Continuously |
+| Tenant data leakage | 🔴 Critical | Security + Integration | `postgres-rls.test.ts`, `tenant-isolation.test.ts` | Every PR |
+| DB Connection Pool Context Poisoning | 🔴 Critical | Security | `postgres-pool-leak.test.ts` | Every PR |
+| Kafka schema breaking change | 🔴 Critical | Event Contract | `workflow-events.consumer.pact.test.ts`, `schema-compatibility.test.ts` | Every PR |
+| API contract broken for consumer | 🔴 Critical | API Contract | `workflow-api.consumer.pact.test.ts`, `workflow-api.provider.pact.test.ts` | Every PR |
+| Event ordering failure / Race conditions | 🔴 Critical | Contract | `kafka-partition-ordering.contract.test.ts` (Murmur2) | Every PR |
+| Noisy Neighbor / Platform DDoS | 🟠 High | Performance | `k6-noisy-neighbor.js` (429 Throttling) | Every release |
+| Micro-frontend widget crashes host app | 🟠 High | E2E | `mfe-integration.spec.ts` (Playwright Error Boundary) | Every PR |
+| Workflow SLA breach & missed escalation | 🟠 High | Unit / State Machine | `workflow-sla-escalation.test.ts` (Fake Timers) | Every PR |
+| Broken Distributed Trace Waterfall | 🟠 High | Integration / Observability | `trace-waterfall.integration.test.ts` | Every PR |
+| WCAG Accessibility Non-compliance | 🟡 Medium | E2E / a11y | `accessibility.spec.ts` (`@axe-core/playwright`) | Every PR |
+| CI pipeline flakiness | 🟡 Medium | All layers | Vitest retries & Playwright tracing | Continuously |
 | AI agent actor misbehaviour (future) | 🔵 Low-Future | E2E | Playwright | When AX features ship |
 
 ---

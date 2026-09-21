@@ -1071,14 +1071,14 @@ curl -s "http://localhost:9090/api/v1/query?query=kafka_dlq_messages_total"
 
 ## 🧪 Automated Testing Guide
 
-The platform features an **8-Layer Quality Engineering Testing Pyramid** with over 130+ automated tests across 28 test suites.
+The platform features an **8-Layer Quality Engineering Testing Pyramid** with over **140+ automated tests across 30+ test suites**.
 
 ### 1. Developer Fast Feedback Loop
 ```bash
-# ⚡ Fast Pre-Commit Check (< 3s): Typecheck + Unit + React Component tests
+# ⚡ Fast Pre-Commit Check (< 3s): Typecheck + Unit + React Component tests (69 tests)
 npm run check:fast
 
-# 🔍 Pre-Push Full Check (~8s): Typecheck + Unit + Contract + Pact + Security
+# 🔍 Pre-Push Full Check (~8s): Typecheck + Unit + Contract + Pact + Security (134 tests)
 npm run check:all
 
 # 🔄 Interactive Vitest Watch Mode (hot-reloads on file changes)
@@ -1090,10 +1090,10 @@ npm run test:watch
 # Run all automated test suites across the monorepo
 npm test
 
-# Run microservice unit tests only (state machine, rules engine, outbox, SSE)
+# Run microservice unit tests (state machine, rules engine, rate limiter, SLA time-travel, outbox, SSE)
 npm run test:unit
 
-# Run REST API & Kafka CloudEvents contract tests
+# Run REST API & Kafka CloudEvents contract & Murmur2 partition ordering tests
 npm run test:contract
 
 # Run Consumer-Driven Pact contract tests (HTTP & MessagePact)
@@ -1102,20 +1102,20 @@ npm run test:pact
 # Run Pact Can-I-Deploy matrix gate check
 npm run pact:can-i-deploy -- --pacticipant workflow-api --version 1.0.0 --to-environment dev
 
-# Run PostgreSQL Row-Level Security & Tenant Isolation tests
+# Run PostgreSQL Row-Level Security, Tenant Isolation & DB Pool Leak Guard tests
 npm run test:security
 
-# Run integration tests (Testcontainers PostgreSQL RLS & Outbox loop)
+# Run integration tests (Trace waterfall, DLQ resilience, outbox loop & Testcontainers RLS)
 npm run test:integration
 ```
 
 ### 3. End-to-End Automated Tests (Playwright)
-Executes multi-tenant isolation tests and complete end-to-end workflow lifecycle journeys in real browsers:
+Executes multi-tenant isolation tests, MFE event bus contracts, API error boundaries, and automated WCAG 2.1 AA accessibility scans:
 ```bash
 # First time setup (if Playwright browsers not installed):
 npx playwright install chromium
 
-# Run headless E2E tests:
+# Run all headless E2E tests (Lifecycle, MFE Integration, a11y):
 npm run test:e2e
 
 # Run interactively with Playwright UI:
@@ -1123,10 +1123,29 @@ npx playwright test --ui
 ```
 
 ### 4. Performance & Load Tests (k6)
-Simulates concurrent users creating, submitting, and listing workflows while enforcing strict SLA thresholds (`P95 < 200ms`, `Error Rate < 1%`):
+Simulates concurrent multi-tenant workloads, SLA thresholds, and noisy-neighbor throttling:
 ```bash
+# Baseline workflow creation & listing load test (P95 < 200ms)
 npm run test:perf
+
+# Multi-tenant noisy neighbor isolation test (Flooder 429 throttling vs High-SLA VIP p95 < 100ms)
+npm run test:perf:noisy-neighbor
 ```
+
+---
+
+### 5. Summary of Key Platform Test Suites
+
+| Category | Test Suite File | What It Validates |
+|---|---|---|
+| **Contract** | `tests/contract/kafka-partition-ordering.contract.test.ts` | Murmur2 partition hashing, partition key invariant `${tenantId}:${workflowId}`, monotonic FIFO state sequence. |
+| **Unit** | `tests/unit/rate-limiting.test.ts` | Per-tenant token-bucket rate limiting, RFC headers (`X-RateLimit-Limit`, `Retry-After`), and 429 isolation. |
+| **Unit** | `tests/unit/workflow-sla-escalation.test.ts` | Deterministic fake timers (`vi.useFakeTimers`), 48h SLA step escalation to `DEPARTMENT_MANAGER`, 30-day draft TTL. |
+| **Security** | `tests/security/postgres-pool-leak.test.ts` | Connection pool reuse hygiene, `is_local=true` transaction scoping, mid-transaction rollback and context reset. |
+| **Integration** | `tests/integration/trace-waterfall.integration.test.ts` | End-to-end W3C `traceparent` context propagation from Fastify Gateway ➔ Outbox ➔ Kafka ➔ Audit/Notification spans. |
+| **E2E** | `tests/e2e/mfe-integration.spec.ts` | Micro-frontend custom event bubbling (`workflow-status-change`), live persona switching, API 500 error boundary recovery. |
+| **E2E** | `tests/e2e/accessibility.spec.ts` | Automated WCAG 2.1 AA scanning using `@axe-core/playwright` across host app, widget, and modal dialogs. |
+| **Performance**| `tests/perf/k6-noisy-neighbor.js` | 200 req/sec flood throttling (429) while innocent tenant maintains <100ms p95 latency. |
 
 ---
 

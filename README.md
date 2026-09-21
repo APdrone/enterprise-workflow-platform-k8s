@@ -83,25 +83,37 @@ flowchart TD
    - Resilient multi-topic topology: `workflow.events` $\rightarrow$ `workflow.events.retry` (3 exponential backoff retries) $\rightarrow$ `workflow.events.dlq`.
    - Poison-pill isolation: Malformed JSON or schema-violating events are intercepted and routed to DLQ without blocking consumer partitions.
    - DLQ persistence & replay REST APIs (`GET /api/v1/dlq/messages`, `POST /api/v1/dlq/replay/:id`).
-3. **Configurable Workflow Rules & Parallel Approvals (AND/OR Quorums)**:
+3. **Strict Kafka Partition Routing & Event Ordering (Murmur2 Hashing)**:
+   - Deterministic partition key routing (`${tenantId}:${workflowId}`) adhering to Apache Kafka's 32-bit Murmur2 hashing algorithm.
+   - Preserves strict monotonic FIFO ordering for sequential lifecycle transitions (`SUBMITTED` $\rightarrow$ `STEP_APPROVED` $\rightarrow$ `APPROVED`) across multi-partition topics.
+4. **Tenant-Aware Rate Limiting & Noisy Neighbor Protection**:
+   - In-memory sliding-window token bucket rate limiter (`rateLimitMiddleware`) enforcing per-tenant request quotas.
+   - Emits standard RFC rate limit headers (`X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`, `Retry-After`) and returns HTTP 429 (`RATE_LIMIT_EXCEEDED`) for abusive tenants while safeguarding innocent tenants' p95 latency.
+5. **Configurable Workflow Rules & Parallel Approvals (AND/OR Quorums)**:
    - Tenant-scoped dynamic rules engine (`workflow_rules` table and `/api/v1/rules` API) supporting priority-based rule matching by workflow type, amount thresholds, and department.
    - **`ALL_MUST_APPROVE` (AND Quorum)**: Unanimous multi-reviewer approval required on the same step order.
    - **`ANY_CAN_APPROVE` (OR Quorum)**: First-responder approval auto-skips sibling parallel steps.
    - Automatic parallel reviewer dispatch (`Finance Director` + `VP Approval`) for high-value requests (> $100k).
-4. **Database Security Hardening (PostgreSQL Row-Level Security / RLS)**:
+6. **Database Security Hardening & Connection Pool Hygiene (PostgreSQL RLS)**:
    - Hardware/engine-level tenant isolation: `FORCE ROW LEVEL SECURITY` on all tenant-scoped tables.
    - Dynamic session policy (`app.current_tenant_id`) with `WITH CHECK` constraints physically blocking unauthorized cross-tenant writes at the database kernel level.
-   - Connection pool transaction helper `withTenantContext` ensuring zero context leakage across pooled physical connections.
-5. **Transactional Outbox Pattern (Dual-Write Resilience)**:
+   - Connection pool transaction helper `withTenantContext` with transaction-local `is_local=true` scoping, guaranteeing zero context leakage or connection poisoning across pooled physical connections.
+7. **Transactional Outbox Pattern (Dual-Write Resilience)**:
    - Workflow state updates and outbound CloudEvents are committed in a **single atomic PostgreSQL ACID transaction**.
    - Zero event loss during Kafka outages: API returns `200 OK` immediately while events accumulate safely in `outbox_events` (`published = false`).
    - The Outbox Relay automatically drains the backlog with exponential backoff once Kafka recovers.
-6. **End-to-End Distributed Tracing (W3C TraceContext)**:
+8. **End-to-End Distributed Tracing & Trace Waterfall Verification (W3C TraceContext)**:
    - Root HTTP span initialized on API actions and propagated via W3C `traceparent` headers through PostgreSQL Outbox records and Kafka headers to downstream consumer child spans in **Jaeger UI**.
-7. **Idempotency & Concurrent Conflict Protection**:
+   - Verified trace waterfall integrity across distributed microservice boundaries.
+9. **Idempotency & Concurrent Conflict Protection**:
    - Native `idempotency-key` header pre-handler caches and deduplicates requests (`x-idempotent-replay: true`).
-8. **Microfrontend Web Component (`<workflow-widget>`)**:
-   - Zero-dependency custom element encapsulated in Shadow DOM, embeddable inside any host application (React, Angular, Vue, or Vanilla HTML).
+10. **Microfrontend Web Component (`<workflow-widget>`) & Error Boundary Isolation**:
+    - Zero-dependency custom element encapsulated in Shadow DOM, embeddable inside any host application (React, Angular, Vue, or Vanilla HTML).
+    - Bi-directional event bus contract (`workflow-status-change`, `workflow-error`) and graceful error boundary degradation preventing host application crashes during backend API dropouts.
+11. **Workflow SLA Time-Travel & Escalation State Machine**:
+    - Deterministic clock manipulation (`vi.useFakeTimers`) for approval step SLA timeouts (48h escalation from `TEAM_LEAD` to `DEPARTMENT_MANAGER`) and 30-day draft TTL auto-cancellation.
+12. **Automated Accessibility (a11y) WCAG 2.1 AA Auditing**:
+    - Automated Axe compliance scans (`@axe-core/playwright`) auditing host dashboards, modal dialogs, and embedded widgets.
 
 ---
 
@@ -186,14 +198,14 @@ PostgreSQL 16 managed with **Drizzle ORM** (Port `5433` / Database `workflow_db`
 │   ├── host-app/               # React 18 + Vite host dashboard (SSE Live Sync, Inbox, Expenses, Audit, Alerts)
 │   └── workflow-widget/        # Framework-agnostic Web Component (<workflow-widget>) with Parallel Step Cards
 ├── services/
-│   ├── workflow-api/           # Core Fastify API: State machine, Rules Engine, Outbox Relay, Delegations & RLS
+│   ├── workflow-api/           # Core Fastify API: State machine, Rules Engine, Outbox Relay, Delegations, Rate Limiting & RLS
 │   ├── notification-service/   # SSE live streaming hub (/api/v1/stream) and role-targeted alert consumer
 │   └── audit-service/          # Kafka consumer service persisting immutable CloudEvents & DLQ sink/replay API
 ├── packages/
 │   ├── shared-schemas/         # Zod schemas, DLQ resilience headers & CloudEvents 1.0 contract validators
 │   ├── shared-types/           # Shared TypeScript domain types, Parallel Quorum policies & DTO interfaces
 │   ├── telemetry/              # OpenTelemetry OTLP tracer, Prometheus metrics & Fastify global plugin
-│   └── test-utils/             # Shared testing helpers, DB reset & Kafka mocks
+│   └── test-utils/             # Kafka Murmur2 partitioner, Shared testing helpers, DB reset & Kafka mocks
 ├── k8s/                        # Kubernetes manifests & 1-click local scripts
 │   ├── 00-namespace.yaml       # Namespace workflow-platform
 │   ├── 01-configmaps-secrets.yaml # Global environment variables & OTLP exporter endpoints
@@ -205,7 +217,13 @@ PostgreSQL 16 managed with **Drizzle ORM** (Port `5433` / Database `workflow_db`
 │   ├── 07-host-app.yaml        # Host React App NGINX Deployment & Service
 │   ├── 08-observability.yaml   # Jaeger Tracing, Prometheus Server & Kafka UI
 │   └── local/                  # Local cluster setup, fast hot-reloads & port-forwards
-├── tests/                      # Automated test suite (130+ tests across 28 suites: Unit, React Component, Pact, RLS Security, Integration, E2E)
+├── tests/                      # Automated test suite (140+ tests across 30+ suites)
+│   ├── contract/               # Kafka partition ordering, CloudEvents schemas & Consumer/Provider Pact CDCT
+│   ├── unit/                   # State machine, rules engine, rate limiter, SLA time-travel & telemetry tests
+│   ├── integration/            # Trace waterfall, outbox relay, DLQ resilience & live PostgreSQL RLS tests
+│   ├── security/               # PostgreSQL pool leak guard, tenant isolation & IDOR tests
+│   ├── perf/                   # k6 workflow load & multi-tenant noisy neighbor isolation benchmarks
+│   └── e2e/                    # Playwright user journeys, MFE event bus, error boundary & Axe a11y audits
 ├── docker-compose.yml          # Local Docker Compose multi-container stack
 ├── playwright.config.ts        # Playwright E2E browser test configuration
 └── pacts/                      # Generated Pact Consumer-Driven Contract JSON specifications
@@ -219,13 +237,13 @@ The platform implements an **8-Layer Quality Engineering & Testing Pyramid** int
 
 ```
                               ▲
-                             / \     Tier 8: Performance SLAs (k6 - P95 < 200ms)
-                            /   \    Tier 7: End-to-End User Journeys (Playwright Browser)
-                           /     \   Tier 6: Service Integration & Live RLS (Testcontainers)
-                          /       \  Tier 5: Tenant Security Matrix & Token Tampering (Vitest)
-                         /         \ Tier 4: Consumer-Driven Contracts (Pact V3 & MessagePact)
+                             / \     Tier 8: Performance SLAs & Noisy Neighbor (k6 - P95 < 100ms)
+                            /   \    Tier 7: End-to-End User Journeys, MFE & a11y (Playwright + Axe)
+                           /     \   Tier 6: Trace Waterfall & Service Integration (Testcontainers)
+                          /       \  Tier 5: Tenant Security Matrix & Pool Leak Guard (Vitest)
+                         /         \ Tier 4: Consumer-Driven Contracts & Kafka Ordering (Pact & Murmur2)
                         /           \Tier 3: Frontend Component & Hook Suite (React Testing Lib + JSDOM)
-                       /             \Tier 2: Microservice Unit Logic & Outbox State Machine (Vitest)
+                       /             \Tier 2: Microservice Unit Logic, SLA Time-Travel & Rate Limits (Vitest)
                       /_______________\Tier 1: Static Type Safety & Compilation (TypeScript Strict)
 ```
 
@@ -233,17 +251,19 @@ The platform implements an **8-Layer Quality Engineering & Testing Pyramid** int
 
 | Command | Purpose | Speed | When to Run |
 |---|---|---|---|
-| `npm run check:fast` | Monorepo Typecheck + Unit + React Component tests | **~3s** | Before every commit |
-| `npm run check:all` | Typecheck + Unit + Contract + Pact + Security tests | **~8s** | Before opening a PR |
+| `npm run check:fast` | Monorepo Typecheck + Unit + React Component tests (69 tests) | **~3s** | Before every commit |
+| `npm run check:all` | Typecheck + Unit + Contract + Pact + Security tests (134 tests) | **~8s** | Before opening a PR |
 | `npm run test:watch` | Vitest interactive live test runner | **Instant** | During active feature development |
-| `npm test` | Runs all 28 automated test suites | **~9s** | Full workspace validation |
-| `npm run test:unit` | Service state machines, rules engine & outbox relay tests | **~1s** | Backend logic iteration |
-| `npm run test:contract` | Live Fastify routes & CloudEvents 1.0 schema tests | **~1s** | API & event schema changes |
+| `npm test` | Runs all automated test suites across the monorepo | **~9s** | Full workspace validation |
+| `npm run test:unit` | Service state machines, rules engine, rate limiter & SLA escalation tests | **~1s** | Backend logic iteration |
+| `npm run test:contract` | Kafka partition ordering, Fastify routes & CloudEvents 1.0 schemas | **~1s** | API & event schema changes |
 | `npm run test:pact` | Generates & verifies HTTP & Kafka MessagePact contracts | **~3s** | Cross-service contract verification |
 | `npm run pact:can-i-deploy` | Queries Pact Broker matrix (`dev` / `qa` / `prod`) | **~1s** | Deployment compatibility check |
-| `npm run test:security` | Tenant isolation & PostgreSQL RLS kernel policy tests | **~1s** | Security & multi-tenant changes |
-| `npm run test:e2e` | Playwright browser user journey tests | **~15s** | Full frontend-to-backend journeys |
-| `npm run test:perf` | k6 load test script enforcing P95 SLA thresholds | **~50s** | Performance benchmarking |
+| `npm run test:security` | Tenant isolation, DB pool leak guard & PostgreSQL RLS kernel policy tests | **~1s** | Security & multi-tenant changes |
+| `npm run test:integration` | End-to-end trace waterfall, DLQ resilience & outbox loop tests | **~3s** | Distributed subsystem changes |
+| `npm run test:e2e` | Playwright browser journeys, MFE error boundary & WCAG a11y tests | **~15s** | Full frontend-to-backend validation |
+| `npm run test:perf` | k6 workflow load test script enforcing P95 SLA thresholds | **~50s** | Performance benchmarking |
+| `npm run test:perf:noisy-neighbor` | k6 multi-scenario load test (Flooder throttle vs SLA-guaranteed tenant) | **~30s** | Multi-tenant isolation benchmarking |
 
 ---
 

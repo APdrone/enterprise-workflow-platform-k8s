@@ -31,6 +31,7 @@
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "test:perf": "k6 run tests/perf/k6-workflow-load.js",
+    "test:perf:noisy-neighbor": "k6 run tests/perf/k6-noisy-neighbor.js",
     "typecheck": "tsc --noEmit",
     "check:fast": "npm run typecheck && npm run test:unit",
     "check:all": "npm run typecheck && npm run test:unit && npm run test:contract && npm run test:pact && npm run test:security",
@@ -45,6 +46,7 @@
     "k8s:resume": "powershell -ExecutionPolicy Bypass -File ./k8s/local/resume-cluster.ps1"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
     "@pact-foundation/pact": "^17.1.4",
     "@playwright/test": "^1.49.1",
     "@testcontainers/kafka": "^12.1.0",

@@ -2,6 +2,7 @@ import Fastify, { FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import sensible from '@fastify/sensible';
 import { tenantMiddleware } from './middleware/tenant.middleware.js';
+import { rateLimitMiddleware } from './middleware/rate-limit.middleware.js';
 import { idempotencyMiddleware } from './middleware/idempotency.middleware.js';
 import { workflowRoutes } from './routes/workflow.routes.js';
 import { adminRoutes } from './routes/admin.routes.js';
@@ -33,11 +34,22 @@ export async function buildApp(): Promise<FastifyInstance> {
       'idempotency-key',
       'traceparent',
     ],
-    exposedHeaders: ['x-correlation-id', 'traceparent', 'x-idempotent-replay'],
+    exposedHeaders: [
+      'x-correlation-id',
+      'traceparent',
+      'x-idempotent-replay',
+      'X-RateLimit-Limit',
+      'X-RateLimit-Remaining',
+      'X-RateLimit-Reset',
+      'Retry-After',
+    ],
   });
 
   // Global tenant middleware
   app.addHook('onRequest', tenantMiddleware);
+
+  // Tenant-aware rate limiting (Noisy Neighbor protection)
+  app.addHook('preHandler', rateLimitMiddleware);
 
   // Idempotency pre-handler for POST/PUT/PATCH/DELETE
   app.addHook('preHandler', idempotencyMiddleware);
