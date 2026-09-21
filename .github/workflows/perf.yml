@@ -1,0 +1,66 @@
+name: "Performance & Noisy-Neighbor Load Testing"
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_type:
+        description: "Performance Test Scenario"
+        required: true
+        default: "noisy-neighbor"
+        type: choice
+        options:
+          - "noisy-neighbor"
+          - "workflow-load"
+          - "all"
+      api_base_url:
+        description: "Target API Base URL"
+        required: false
+        default: "http://localhost:3000"
+  schedule:
+    # Run nightly at 02:00 UTC
+    - cron: '0 2 * * *'
+
+jobs:
+  k6-performance:
+    name: "k6 Performance & Tenant Isolation Benchmarks"
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Checkout Code"
+        uses: actions/checkout@v4
+
+      - name: "Setup Node.js 22"
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: "Install Monorepo Dependencies"
+        run: npm ci
+
+      - name: "Install k6 Binary"
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install -y k6
+
+      - name: "Start Local Mock Services for Standalone Load Test"
+        run: |
+          npm run dev:api &
+          npx wait-on http://localhost:3000/health --timeout 60000
+        env:
+          NODE_ENV: test
+          PORT: 3000
+
+      - name: "Run k6 Noisy-Neighbor Test"
+        if: ${{ github.event.inputs.test_type == 'noisy-neighbor' || github.event.inputs.test_type == 'all' || github.event_name == 'schedule' }}
+        run: npm run test:perf:noisy-neighbor
+        env:
+          API_URL: ${{ github.event.inputs.api_base_url || 'http://localhost:3000' }}
+
+      - name: "Run k6 General Workflow Load Test"
+        if: ${{ github.event.inputs.test_type == 'workflow-load' || github.event.inputs.test_type == 'all' }}
+        run: npm run test:perf
+        env:
+          API_URL: ${{ github.event.inputs.api_base_url || 'http://localhost:3000' }}
