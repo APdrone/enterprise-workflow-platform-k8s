@@ -16,9 +16,9 @@ on:
         description: "Target API Base URL"
         required: false
         default: "http://localhost:3000"
-  schedule:
+  # schedule:
     # Run nightly at 02:00 UTC
-    - cron: '0 2 * * *'
+    # - cron: '0 2 * * *'
 
 jobs:
   k6-performance:
